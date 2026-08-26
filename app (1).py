@@ -1,4 +1,5 @@
 import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
 import pandas as pd
 import plotly.express as px
 from io import BytesIO
@@ -427,14 +428,25 @@ def pdf_top5_chart(alarm_df):
 
     values = [max(0, round(v.total_seconds()/3600, 1)) for v in top["Longest Continuous"]]
     maxv = max(values) if values else 1
-    left, right = 155, 410
+    left, right = 165, 410
     row_h = 25
     for idx, ((_, row), value) in enumerate(zip(top.iterrows(), values)):
         y = 118 - idx * row_h
         name = str(row["Equipment"])
-        if len(name) > 29:
-            name = name[:27] + "…"
-        d.add(String(148, y+3, name, fontName="Helvetica", fontSize=6.8,
+        if " – " in name:
+            short_name = name.split(" – ", 1)[1]
+            if short_name in {"Chiller", "Freezer"}:
+                short_name = name
+        elif " - " in name:
+            short_name = name.split(" - ", 1)[1]
+            if short_name in {"Chiller", "Freezer"}:
+                short_name = name
+        else:
+            short_name = name
+        name = short_name
+        if len(name) > 26:
+            name = name[:24] + "…"
+        d.add(String(148, y+3, name, fontName="Helvetica", fontSize=7.0,
                      textAnchor="end", fillColor=colors.HexColor("#263746")))
         width = (right-left) * value / maxv if maxv else 0
         d.add(Rect(left, y-3, width, 12, fillColor=colors.HexColor("#E84A5F"),
@@ -617,6 +629,13 @@ def build_pdf_report(result, data, median_interval, raw=None):
         "Status colors are applied only to the final column for quick scanning.",
         note
     ))
+    story.append(Paragraph(
+        "<b>Reading guide:</b> Continuous = longest threshold excursion. "
+        "Exceeded = time beyond the applicable PPHG delay. "
+        "Excursions = number of distinct threshold excursions detected for that equipment.",
+        note
+    ))
+    story.append(Spacer(1,1.5*mm))
 
     headers = ["Equipment","Cat.","Min °C","Avg °C","Max °C","Start","End",
                "Continuous","Exceeded","Excursions","Status"]
@@ -638,10 +657,10 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,0),6.8),("FONTSIZE",(0,1),(-1,-1),6.8),
+        ("FONTSIZE",(0,0),(-1,0),6.6),("FONTSIZE",(0,1),(-1,-1),6.5),
         ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"CENTER"),
-        ("TOPPADDING",(0,0),(-1,-1),3.2),("BOTTOMPADDING",(0,0),(-1,-1),3.2),
+        ("TOPPADDING",(0,0),(-1,-1),2.0),("BOTTOMPADDING",(0,0),(-1,-1),2.0),
     ]
     for i, (_, r) in enumerate(result.iterrows(), 1):
         status = r["Status"]
@@ -657,38 +676,31 @@ def build_pdf_report(result, data, median_interval, raw=None):
             cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFF7D6")))
     at.setStyle(TableStyle(cmd))
     story.append(at)
-    story.append(Spacer(1,2*mm))
-    story.append(Paragraph(
-        "<b>Reading guide:</b> Continuous = longest threshold excursion. Exceeded = time beyond the PPHG delay. "
-        "Excursions = number of distinct threshold excursions detected for that equipment.",
-        note
-    ))
 
-    # PAGE 3 — Management actions
+    # PAGE 3 — Alarm analysis and priority
     story.append(PageBreak())
-    story.append(Paragraph("3. Management Analysis & Recommended Actions", title))
+    story.append(Paragraph("3. Alarm Analysis & Priority Review", title))
     story.append(Paragraph(
         f"<b>{alarms} ALARM equipment</b> identified. "
         f"<b>{urgent}</b> have continuous excursions &gt;24h and are classified <b>REVIEW URGENTLY</b>.",
         callout
     ))
-    priority = [["Priority","Equipment","Cat.","Continuous","Exceeded","Peak","Action / review focus"]]
+    priority = [["Rank","Equipment","Category","Continuous","Exceeded By","Peak °C","Excursions"]]
     for rank, (_, r) in enumerate(alarm_df.iterrows(), 1):
-        urgent_tag = "URGENT >24h" if r["Longest Continuous"] > pd.Timedelta(hours=24) else "Review"
         priority.append([
-            str(rank), Paragraph(str(r["Equipment"]), tiny), str(r["Category"]),
+            str(rank), Paragraph(str(r["Equipment"]), small), str(r["Category"]),
             format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]),
             f"{r['Peak During Excursion °C']:.1f}°C",
-            Paragraph(f"<b>{urgent_tag}</b> — {_action_short(r)}", tiny)
+            str(int(r["Excursion Count"]))
         ])
-    pt2 = Table(priority, colWidths=[13*mm,57*mm,18*mm,28*mm,27*mm,18*mm,87*mm], repeatRows=1)
+    pt2 = Table(priority, colWidths=[13*mm,82*mm,24*mm,34*mm,34*mm,25*mm,25*mm], repeatRows=1)
     st2 = [
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,-1),6.7),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+        ("FONTSIZE",(0,0),(-1,-1),7.0),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,1),(0,-1),"CENTER"),
-        ("ALIGN",(2,1),(5,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),3),
+        ("ALIGN",(2,1),(-1,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),3.2),
         ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]
     for i, (_, r) in enumerate(alarm_df.iterrows(),1):
@@ -697,9 +709,16 @@ def build_pdf_report(result, data, median_interval, raw=None):
     pt2.setStyle(TableStyle(st2))
     story.append(pt2)
     story.append(Spacer(1,3*mm))
+    story.append(Spacer(1,3*mm))
     story.append(Paragraph(
-        "<b>Management interpretation:</b> These recommendations are operational review prompts, not root-cause diagnoses. "
-        "Confirm causes against maintenance history, loading/door records, ambient conditions and equipment operating records.",
+        "<b>Priority interpretation:</b> An ALARM unit with a continuous excursion exceeding 24 hours may indicate a sustained equipment performance issue "
+        "and should receive priority operational review. This is an analytical flag, not a root-cause diagnosis.",
+        note
+    ))
+    story.append(Paragraph(
+        "<b>General review notes:</b> For chillers, review door/loading practices, ambient exposure, condenser/coil condition, airflow and temperature control. "
+        "For freezers, review refrigeration performance, door/seal condition, defrost operation, loading and condenser/coil condition. "
+        "Repeated excursions also indicate a recurrence pattern that may warrant operational review.",
         note
     ))
 
@@ -708,31 +727,37 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("4. Warning & Single-Point Review", title))
     if warnings:
         story.append(Paragraph("WARNING — Monitor & Follow Up", h2))
-        wd = [["Equipment","Category","Continuous","Excursions","Peak °C","Management focus"]]
+        wd = [["Equipment","Category","Continuous","Excursions","Peak °C"]]
         for _, r in warning_df.iterrows():
             wd.append([
-                Paragraph(str(r["Equipment"]), tiny), str(r["Category"]),
+                Paragraph(str(r["Equipment"]), small), str(r["Category"]),
                 format_duration(r["Longest Continuous"]), str(int(r["Excursion Count"])),
-                f"{r['Peak During Excursion °C']:.1f}",
-                Paragraph(_action_short(r), tiny)
+                f"{r['Peak During Excursion °C']:.1f}"
             ])
-        wt = Table(wd, colWidths=[58*mm,22*mm,28*mm,22*mm,22*mm,88*mm], repeatRows=1)
+        wt = Table(wd, colWidths=[92*mm,30*mm,36*mm,30*mm,28*mm], repeatRows=1)
         wt.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF0CC")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#6B4A00")),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
             ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),6.8),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("ALIGN",(1,1),(4,-1),"CENTER"),
+            ("FONTSIZE",(0,0),(-1,-1),7.0),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("ALIGN",(1,1),(-1,-1),"CENTER"),
             ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]))
         story.append(wt)
         story.append(Paragraph(
-            "Warning units did not reach the applicable alarm duration. Repeated excursions or durations approaching the alarm delay should receive follow-up.",
+            "<b>Warning interpretation:</b> These units exceeded the applicable temperature threshold but did not reach the PPHG alarm duration. "
+            "They should be monitored for recurrence, especially when excursion duration approaches the alarm delay.",
+            note
+        ))
+        story.append(Paragraph(
+            "<b>General review notes:</b> Chillers — door/loading, ambient exposure, condenser/coil, airflow and temperature control. "
+            "Freezers — refrigeration performance, door/seal, defrost, loading and condenser/coil.",
             note
         ))
 
     if not single_df.empty:
+        story.append(Spacer(1,3*mm))
         story.append(Paragraph("Single-Point Excursions", h2))
         story.append(Paragraph(
             "A threshold excursion was observed, but no elapsed duration can be established from the available point(s). "
