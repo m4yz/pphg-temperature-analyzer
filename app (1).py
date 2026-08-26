@@ -453,6 +453,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
         callout
     ))
 
+    # Keep KPI cards clearly below the assessment banner.
+    story.append(Spacer(1, 7*mm))
     # KPI row: keep label + value inside ONE cell so the two text
     # elements can never overlap or be clipped by a row boundary.
     kpi_cells = [
@@ -463,18 +465,18 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ]
     kpi = Table([kpi_cells], colWidths=[69*mm]*4, rowHeights=[16*mm])
     kpi.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(0,1),colors.HexColor("#F3F7FA")),
-        ("BACKGROUND",(1,0),(1,1),colors.HexColor("#FFF0F0")),
-        ("BACKGROUND",(2,0),(2,1),colors.HexColor("#FFF4E6")),
-        ("BACKGROUND",(3,0),(3,1),colors.HexColor("#EAF8F0")),
+        ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F3F7FA")),
+        ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0F0")),
+        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#FFF4E6")),
+        ("BACKGROUND",(3,0),(3,0),colors.HexColor("#EAF8F0")),
         ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
         ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ALIGN",(0,0),(-1,-1),"LEFT"),
         ("LEFTPADDING",(0,0),(-1,-1),5),
         ("RIGHTPADDING",(0,0),(-1,-1),5),
-        ("TOPPADDING",(0,0),(-1,-1),0),
-        ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),3),
+        ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(kpi)
     story.append(Spacer(1,5*mm))
