@@ -409,38 +409,128 @@ def build_pdf_report(result, data, median_interval):
 
     if alarms:
         story.append(Paragraph(
-            "The equipment listed as ALARM should be prioritized for operational "
-            "review because the longest continuous excursion exceeded the PPHG "
-            "delay requirement. Priority should generally be given to equipment "
-            "with the largest 'Exceeded By' duration and the highest excursion peak.",
+            f"<b>{alarms} equipment are classified as ALARM.</b> "
+            "The table below ranks the alarm equipment by the duration beyond the "
+            "applicable PPHG alarm delay (Exceeded By). This makes the units with "
+            "the most prolonged excursions easier to identify and prioritize.",
             body
         ))
-        for _, r in alarm_df.head(10).iterrows():
-            story.append(Paragraph(
-                f"• <b>{r['Equipment']}</b> — {r['Category']}; "
-                f"continuous {format_duration(r['Longest Continuous'])}; "
-                f"exceeded by {format_duration(r['Exceeded By'])}; "
-                f"peak {r['Peak During Excursion °C']:.1f}°C. "
-                f"Review door opening, loading, ambient exposure, condenser/coil "
-                f"condition, and equipment performance as applicable.",
-                body
-            ))
+
+        # Management-friendly ranking table instead of long repetitive bullets.
+        priority_data = [[
+            "Priority", "Equipment", "Cat.", "Longest Continuous",
+            "Exceeded By", "Peak °C", "Assessment"
+        ]]
+        for rank, (_, r) in enumerate(alarm_df.head(10).iterrows(), start=1):
+            priority_data.append([
+                str(rank),
+                Paragraph(str(r["Equipment"]), small),
+                str(r["Category"]),
+                format_duration(r["Longest Continuous"]),
+                format_duration(r["Exceeded By"]),
+                f"{r['Peak During Excursion °C']:.1f}",
+                Paragraph(
+                    "Review urgently" if r["Exceeded By"] >= pd.Timedelta(hours=24)
+                    else "Review equipment",
+                    small
+                ),
+            ])
+
+        pt = Table(
+            priority_data,
+            colWidths=[13*mm, 63*mm, 18*mm, 31*mm, 28*mm, 20*mm, 30*mm],
+            repeatRows=1,
+        )
+        pt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,0), 7),
+            ("FONTSIZE", (0,1), (-1,-1), 6.8),
+            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C5CCD3")),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN", (0,1), (0,-1), "CENTER"),
+            ("ALIGN", (2,1), (5,-1), "CENTER"),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        for i, (_, r) in enumerate(alarm_df.head(10).iterrows(), start=1):
+            if r["Exceeded By"] >= pd.Timedelta(hours=24):
+                pt.setStyle(TableStyle([
+                    ("BACKGROUND", (0,i), (-1,i), colors.HexColor("#FFE5E5")),
+                    ("FONTNAME", (0,i), (0,i), "Helvetica-Bold"),
+                ]))
+        story.append(pt)
+        story.append(Spacer(1, 3*mm))
+
+        story.append(Paragraph(
+            "<b>How to read the ranking:</b> <i>Exceeded By</i> shows how far the "
+            "longest continuous excursion went beyond the PPHG alarm delay. "
+            "A longer duration indicates a more prolonged excursion. <i>Peak °C</i> "
+            "shows the highest temperature reached during that excursion.",
+            note
+        ))
+
+        story.append(Paragraph("Recommended review focus", h1))
+        story.append(Paragraph(
+            "For the ALARM equipment above, review the applicable operational causes "
+            "such as door opening frequency, loading/unloading, ambient exposure, "
+            "condenser/coil condition, airflow, and equipment performance. "
+            "The ranking is intended to help prioritize the review; it does not "
+            "identify the root cause by itself.",
+            body
+        ))
 
     if warnings:
+        story.append(Paragraph("WARNING Equipment", h1))
+        warning_df = result[result["Status"] == "WARNING"].copy()
+        warning_df["excess_min"] = warning_df["Exceeded By"].dt.total_seconds()/60
+        warning_df = warning_df.sort_values(
+            "Longest Continuous", ascending=False
+        )
+
+        warning_data = [["Equipment", "Category", "Longest Continuous", "Peak °C"]]
+        for _, r in warning_df.iterrows():
+            warning_data.append([
+                Paragraph(str(r["Equipment"]), small),
+                str(r["Category"]),
+                format_duration(r["Longest Continuous"]),
+                f"{r['Peak During Excursion °C']:.1f}",
+            ])
+        wt = Table(
+            warning_data,
+            colWidths=[78*mm, 25*mm, 40*mm, 25*mm],
+            repeatRows=1,
+        )
+        wt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#FFF0CC")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#6B4A00")),
+            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C5CCD3")),
+            ("FONTSIZE", (0,0), (-1,-1), 7),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN", (1,1), (-1,-1), "CENTER"),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.append(wt)
+        story.append(Spacer(1, 2*mm))
         story.append(Paragraph(
-            "WARNING equipment did not exceed the PPHG delay duration, but the "
-            "temperature excursion was still detected. These units should be "
-            "reviewed for recurring short excursions, especially where the "
-            "Longest Continuous duration is approaching the alarm delay.",
-            body
+            "WARNING equipment experienced a temperature excursion but did not "
+            "reach the PPHG alarm-duration criterion. These units should be watched "
+            "for recurrence, particularly where the longest continuous duration "
+            "approaches the applicable alarm delay.",
+            note
         ))
 
     if other:
+        story.append(Paragraph("Other / Not Yet Classified", h1))
         story.append(Paragraph(
-            "Measurement points currently classified as Other are excluded from "
-            "PPHG Chiller/Freezer alarm classification. After unique Testo naming "
-            "is implemented, their category should be mapped before using the "
-            "report for formal compliance assessment.",
+            f"<b>{other} measurement point(s)</b> are currently classified as "
+            "<b>Other</b> and are therefore excluded from PPHG Chiller/Freezer "
+            "alarm classification. Once Testo naming is made unique, map each "
+            "point to the correct category before using the result for formal "
+            "compliance assessment.",
             body
         ))
 
