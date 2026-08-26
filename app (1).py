@@ -280,12 +280,11 @@ def _report_footer(canvas, doc):
 
 
 def pdf_status_chart(result):
-    """Dashboard-matched status distribution donut."""
+    """Clean dashboard-matched status distribution donut for PDF."""
     alarms = int((result["Status"] == "ALARM").sum())
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
-    equipment_count = len(result)
-    other_status = max(equipment_count - alarms - warnings - normal, 0)
+    other_status = max(len(result) - alarms - warnings - normal, 0)
 
     labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
     counts = [alarms, warnings, normal, other_status]
@@ -296,43 +295,31 @@ def pdf_status_chart(result):
         colors.HexColor("#9AA3AD"),
     ]
 
-    d = Drawing(320, 155)
+    from reportlab.graphics.shapes import String, Rect
+    d = Drawing(320, 145)
+
+    # Donut only — no center total, so it cannot collide with the chart.
     pie = Pie()
-    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.x, pie.y, pie.width, pie.height = 18, 12, 120, 120
     pie.data = counts
     pie.labels = ["" for _ in counts]
+    pie.slices[0].fillColor = fills[0]
     for i, fill in enumerate(fills):
         pie.slices[i].fillColor = fill
         pie.slices[i].strokeColor = colors.white
         pie.slices[i].strokeWidth = 0.7
     d.add(pie)
 
-    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
-    total = sum(counts)
-    legend_y = 118
-    for i, (label, count) in enumerate(zip(labels, counts)):
+    # Manual legend: fixed positions prevent ReportLab Legend from
+    # overflowing into the adjacent Status Count chart.
+    y = 108
+    for label, count, fill in zip(labels, counts, fills):
         if count <= 0:
             continue
-        pct = count / total * 100 if total else 0
-        # percentage inside each slice is approximated with a compact label
-        # around the donut; keep the legend as the exact value reference.
-    legend = Legend()
-    legend.x, legend.y = 180, 112
-    legend.fontName, legend.fontSize = "Helvetica", 8
-    legend.colorNamePairs = [
-        (fills[i], f"{labels[i]}  {counts[i]}")
-        for i in range(4) if counts[i] > 0
-    ]
-    d.add(legend)
-
-    # Center label, similar to the dashboard's clean Plotly donut.
-    from reportlab.graphics.shapes import String
-    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
-                 fontSize=13, textAnchor="middle",
-                 fillColor=colors.HexColor("#17324D")))
-    d.add(String(92, 56, "equipment", fontName="Helvetica",
-                 fontSize=7, textAnchor="middle",
-                 fillColor=colors.HexColor("#667481")))
+        d.add(Rect(150, y-3, 9, 9, fillColor=fill, strokeColor=colors.HexColor("#6B7785"), strokeWidth=0.35))
+        d.add(String(166, y, f"{label}  {count}", fontName="Helvetica", fontSize=8,
+                   fillColor=colors.HexColor("#334155")))
+        y -= 22
     return d
 
 def pdf_status_count_chart(alarm_df):
@@ -489,14 +476,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
     chart_labels = Table([[
         Paragraph("<b>Status Distribution</b>", h2),
         Paragraph("<b>Status Count</b>", h2),
-    ]], colWidths=[112*mm,138*mm])
+    ]], colWidths=[118*mm,132*mm])
     chart_labels.setStyle(TableStyle([
         ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
         ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story.append(chart_labels)
     charts = Table([[pdf_status_chart(result), pdf_status_count_chart(alarm_df)]],
-                   colWidths=[112*mm,138*mm])
+                   colWidths=[118*mm,132*mm])
     charts.setStyle(TableStyle([
         ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -617,6 +604,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         f"<b>{urgent}</b> have continuous threshold events &gt;24h and are classified <b>REVIEW URGENTLY</b>.",
         callout
     ))
+    story.append(Spacer(1, 3*mm))
     priority = [["Rank","Equipment","Category","Continuous","Exceeded By","Peak °C","Threshold Events"]]
     for rank, (_, r) in enumerate(alarm_df.iterrows(), 1):
         priority.append([
@@ -640,7 +628,6 @@ def build_pdf_report(result, data, median_interval, raw=None):
             st2.append(("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0")))
     pt2.setStyle(TableStyle(st2))
     story.append(pt2)
-    story.append(Spacer(1,3*mm))
     story.append(Spacer(1,3*mm))
     story.append(Paragraph(
         "<b>Priority interpretation:</b> An ALARM unit with a continuous threshold event exceeding 24 hours may indicate a sustained equipment performance issue "
