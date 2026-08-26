@@ -454,16 +454,25 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ))
 
     # Keep KPI cards clearly below the assessment banner.
-    story.append(Spacer(1, 7*mm))
-    # KPI row: keep label + value inside ONE cell so the two text
-    # elements can never overlap or be clipped by a row boundary.
+    story.append(Spacer(1, 4*mm))
+    # KPI cards: use a dedicated leading so the 8pt label and 17pt
+    # value have enough vertical line spacing. The previous shared body
+    # leading was too small and caused the value to overlap the label.
+    kpi_text = ParagraphStyle(
+        "KPICardText",
+        parent=body,
+        fontSize=8.2,
+        leading=19,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
     kpi_cells = [
-        Paragraph(f"<b>Equipment</b><br/><font size=17 color='#17324D'>{len(result)}</font>", body),
-        Paragraph(f"<b>Alarm</b><br/><font size=17 color='#E84A5F'>{alarms}</font>", body),
-        Paragraph(f"<b>Warning</b><br/><font size=17 color='#FF8A4C'>{warnings}</font>", body),
-        Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", body),
+        Paragraph(f"<b>Equipment</b><br/><font size=17 color='#17324D'>{len(result)}</font>", kpi_text),
+        Paragraph(f"<b>Alarm</b><br/><font size=17 color='#E84A5F'>{alarms}</font>", kpi_text),
+        Paragraph(f"<b>Warning</b><br/><font size=17 color='#FF8A4C'>{warnings}</font>", kpi_text),
+        Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", kpi_text),
     ]
-    kpi = Table([kpi_cells], colWidths=[69*mm]*4, rowHeights=[16*mm])
+    kpi = Table([kpi_cells], colWidths=[69*mm]*4, rowHeights=[20*mm])
     kpi.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F3F7FA")),
         ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0F0")),
