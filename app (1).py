@@ -146,8 +146,20 @@ def parse_testo(uploaded):
 
 def analyze(df):
     rows = []
-    interval = df["Timestamp"].sort_values().diff().dropna()
-    median_interval = interval.median() if not interval.empty else pd.Timedelta(minutes=5)
+    # Calculate sampling interval within each equipment series. The parsed
+    # dataframe contains all equipment stacked together, so taking a global
+    # diff would produce many zero-minute differences between equipment rows.
+    per_equipment_intervals = []
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        if not diffs.empty:
+            per_equipment_intervals.extend(diffs.tolist())
+    median_interval = (
+        pd.Series(per_equipment_intervals).median()
+        if per_equipment_intervals
+        else pd.Timedelta(minutes=5)
+    )
 
     for equipment, g in df.groupby("Equipment", sort=False):
         category = g["Category"].iloc[0]
