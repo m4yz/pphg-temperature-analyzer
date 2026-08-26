@@ -376,19 +376,19 @@ def build_pdf_report(result, data, median_interval, raw=None):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=landscape(A4),
-        rightMargin=12*mm, leftMargin=12*mm,
-        topMargin=11*mm, bottomMargin=12*mm,
+        rightMargin=10*mm, leftMargin=10*mm,
+        topMargin=10*mm, bottomMargin=11*mm,
         title="PPHG Temperature Analysis Report",
         author="PPHG Temperature Analyzer",
     )
 
     styles = getSampleStyleSheet()
     title = ParagraphStyle(
-        "ReportTitle", parent=styles["Title"], fontSize=20, leading=23,
+        "ReportTitle", parent=styles["Title"], fontSize=19, leading=22,
         textColor=colors.HexColor("#17324D"), alignment=TA_LEFT, spaceAfter=3*mm
     )
     h1 = ParagraphStyle(
-        "H1", parent=styles["Heading1"], fontSize=14, leading=17,
+        "H1", parent=styles["Heading1"], fontSize=13.5, leading=16,
         textColor=colors.HexColor("#17324D"), spaceBefore=1*mm, spaceAfter=3*mm
     )
     h2 = ParagraphStyle(
@@ -453,21 +453,15 @@ def build_pdf_report(result, data, median_interval, raw=None):
         callout
     ))
 
-    # Dashboard-matched KPI row. Use separate label/value rows so the
-    # numbers can never collide with the labels.
-    kpi_labels = [
-        Paragraph("<b>Equipment</b>", small),
-        Paragraph("<b>Alarm</b>", small),
-        Paragraph("<b>Warning</b>", small),
-        Paragraph("<b>Normal</b>", small),
+    # KPI row: keep label + value inside ONE cell so the two text
+    # elements can never overlap or be clipped by a row boundary.
+    kpi_cells = [
+        Paragraph(f"<b>Equipment</b><br/><font size=17 color='#17324D'>{len(result)}</font>", body),
+        Paragraph(f"<b>Alarm</b><br/><font size=17 color='#E84A5F'>{alarms}</font>", body),
+        Paragraph(f"<b>Warning</b><br/><font size=17 color='#FF8A4C'>{warnings}</font>", body),
+        Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", body),
     ]
-    kpi_values = [
-        Paragraph(f"<font size=17 color='#17324D'>{len(result)}</font>", body),
-        Paragraph(f"<font size=17 color='#E84A5F'>{alarms}</font>", body),
-        Paragraph(f"<font size=17 color='#FF8A4C'>{warnings}</font>", body),
-        Paragraph(f"<font size=17 color='#4CCB88'>{normal}</font>", body),
-    ]
-    kpi = Table([kpi_labels, kpi_values], colWidths=[66*mm]*4, rowHeights=[6.5*mm, 9*mm])
+    kpi = Table([kpi_cells], colWidths=[69*mm]*4, rowHeights=[16*mm])
     kpi.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,1),colors.HexColor("#F3F7FA")),
         ("BACKGROUND",(1,0),(1,1),colors.HexColor("#FFF0F0")),
@@ -483,7 +477,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story.append(kpi)
-    story.append(Spacer(1,4*mm))
+    story.append(Spacer(1,5*mm))
 
     global _CURRENT_RESULT_FOR_PDF
     _CURRENT_RESULT_FOR_PDF = result
@@ -495,14 +489,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
         Paragraph("<b>Status Count</b>", h2),
     ]], colWidths=[125*mm,125*mm], rowHeights=[7*mm])
     chart_labels.setStyle(TableStyle([
-        ("LEFTPADDING",(0,0),(-1,-1),2), ("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
         ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
         ("VALIGN",(0,0),(-1,-1),"BOTTOM"),
     ]))
     story.append(chart_labels)
 
     charts = Table([[pdf_status_chart(result), pdf_status_count_chart(alarm_df)]],
-                   colWidths=[125*mm,125*mm], rowHeights=[43*mm])
+                   colWidths=[133.5*mm,133.5*mm], rowHeights=[49*mm])
     charts.setStyle(TableStyle([
         ("BOX",(0,0),(-1,-1),0.45,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -523,12 +517,12 @@ def build_pdf_report(result, data, median_interval, raw=None):
             format_duration(r["Exceeded By"]),
             f"{r['Peak During Excursion °C']:.1f}",
         ])
-    pt = Table(priority_rows, colWidths=[13*mm,90*mm,35*mm,30*mm,30*mm,20*mm], repeatRows=1)
+    pt = Table(priority_rows, colWidths=[13*mm,100*mm,34*mm,31*mm,31*mm,20*mm], repeatRows=1)
     pt.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,-1),7.2),
+        ("FONTSIZE",(0,0),(-1,-1),7.5),
         ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ALIGN",(0,1),(0,-1),"CENTER"),("ALIGN",(2,1),(-1,-1),"CENTER"),
@@ -591,13 +585,13 @@ def build_pdf_report(result, data, median_interval, raw=None):
             str(int(r["Threshold Events"])),
             "N/A" if r["Category"]=="Other" else str(r["Status"])
         ])
-    at = Table(rows, colWidths=[51*mm,18*mm,13*mm,13*mm,13*mm,24*mm,24*mm,
-                                26*mm,24*mm,18*mm,20*mm], repeatRows=1)
+    at = Table(rows, colWidths=[57*mm,18*mm,13*mm,13*mm,13*mm,23*mm,23*mm,
+                                27*mm,25*mm,20*mm,20*mm], repeatRows=1)
     cmd = [
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,0),6.6),("FONTSIZE",(0,1),(-1,-1),6.5),
+        ("FONTSIZE",(0,0),(-1,0),6.6),("FONTSIZE",(0,1),(-1,-1),6.8),
         ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"CENTER"),
         ("TOPPADDING",(0,0),(-1,-1),2.0),("BOTTOMPADDING",(0,0),(-1,-1),2.0),
@@ -635,11 +629,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
             f"{r['Peak During Excursion °C']:.1f}°C",
             str(int(r["Threshold Events"]))
         ])
-    pt2 = Table(priority, colWidths=[13*mm,82*mm,24*mm,34*mm,34*mm,25*mm,25*mm], repeatRows=1)
+    pt2 = Table(priority, colWidths=[13*mm,91*mm,25*mm,34*mm,34*mm,25*mm,28*mm], repeatRows=1)
     st2 = [
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,-1),7.0),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+        ("FONTSIZE",(0,0),(-1,-1),7.3),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,1),(0,-1),"CENTER"),
         ("ALIGN",(2,1),(-1,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),3.2),
         ("BOTTOMPADDING",(0,0),(-1,-1),3),
@@ -649,7 +643,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
             st2.append(("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0")))
     pt2.setStyle(TableStyle(st2))
     story.append(pt2)
-    story.append(Spacer(1,3*mm))
+    story.append(Spacer(1,4*mm))
     story.append(Paragraph(
         "<b>Priority interpretation:</b> An ALARM unit with a continuous threshold event exceeding 24 hours may indicate a sustained equipment performance issue "
         "and should receive priority operational review. This is an analytical flag, not a root-cause diagnosis.",
