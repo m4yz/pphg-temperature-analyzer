@@ -430,7 +430,7 @@ def build_pdf_report(result, data, median_interval):
                 format_duration(r["Exceeded By"]),
                 f"{r['Peak During Excursion °C']:.1f}",
                 Paragraph(
-                    "Review urgently" if r["Exceeded By"] >= pd.Timedelta(hours=24)
+                    "Review urgently" if r["Exceeded By"] > pd.Timedelta(hours=24)
                     else "Review equipment",
                     small
                 ),
@@ -455,7 +455,7 @@ def build_pdf_report(result, data, median_interval):
             ("BOTTOMPADDING", (0,0), (-1,-1), 4),
         ]))
         for i, (_, r) in enumerate(alarm_df.head(10).iterrows(), start=1):
-            if r["Exceeded By"] >= pd.Timedelta(hours=24):
+            if r["Exceeded By"] > pd.Timedelta(hours=24):
                 pt.setStyle(TableStyle([
                     ("BACKGROUND", (0,i), (-1,i), colors.HexColor("#FFE5E5")),
                     ("FONTNAME", (0,i), (0,i), "Helvetica-Bold"),
