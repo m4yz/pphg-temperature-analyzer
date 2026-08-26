@@ -242,7 +242,7 @@ def build_pdf_report(result, data, median_interval):
     story.append(Paragraph(
         f"<b>Measurement period:</b> {start:%d-%m-%Y %H:%M} to {end:%d-%m-%Y %H:%M}"
         f"&nbsp;&nbsp;&nbsp; <b>Sampling interval:</b> "
-        f"≈ {round(median_interval.total_seconds()/60):g} minutes",
+        f"≈ {median_interval.total_seconds() / 60:.0f} minutes",
         body
     ))
 
