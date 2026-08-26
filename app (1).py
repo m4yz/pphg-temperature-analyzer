@@ -493,7 +493,49 @@ if uploaded:
         st.divider()
         st.subheader("PPHG Analysis")
 
-        show = result.copy()
+        # Filters for the analysis table
+        f1, f2 = st.columns(2)
+        category_options = ["All"] + sorted(result["Category"].dropna().unique().tolist())
+        status_options = ["All"] + ["ALARM", "WARNING", "NORMAL", "N/A"]
+
+        selected_category = f1.selectbox(
+            "Filter by category",
+            category_options,
+            key="analysis_category_filter",
+        )
+        selected_status = f2.selectbox(
+            "Filter by status",
+            status_options,
+            key="analysis_status_filter",
+        )
+
+        filtered_result = result.copy()
+        if selected_category != "All":
+            filtered_result = filtered_result[
+                filtered_result["Category"] == selected_category
+            ]
+        if selected_status != "All":
+            filtered_result = filtered_result[
+                filtered_result["Status"] == selected_status
+            ]
+
+        # PPHG criteria are shown as highlights instead of a table column.
+        st.markdown(
+            """
+            **PPHG Alarm Criteria:** 🔴 **Chiller ≥ 6°C for 2 hours** &nbsp;|&nbsp;
+            🧊 **Freezer ≥ -15°C for 4 hours**
+
+            **Longest Continuous** = longest continuous excursion above the applicable
+            temperature limit. **Exceeded By** = time beyond the applicable PPHG alarm delay.
+            """,
+            unsafe_allow_html=False,
+        )
+
+        if filtered_result.empty:
+            st.warning("Tidak ada equipment yang sesuai dengan filter.")
+            st.stop()
+
+        show = filtered_result.copy()
         for col in ["Min °C", "Average °C", "Max °C", "Peak During Excursion °C"]:
             show[col] = show[col].map(
                 lambda x: f"{x:.1f}" if pd.notna(x) else "—"
@@ -509,7 +551,7 @@ if uploaded:
 
         table_cols = [
             "Equipment", "Category", "Min °C", "Average °C", "Max °C",
-            "Alarm Limit", "Longest Start", "Longest End",
+            "Longest Start", "Longest End",
             "Longest Continuous", "Exceeded By", "Status"
         ]
 
@@ -535,7 +577,7 @@ if uploaded:
 
         selected = st.selectbox(
             "Select equipment",
-            result["Equipment"].tolist()
+            filtered_result["Equipment"].tolist()
         )
 
         selected_result = result[result["Equipment"] == selected].iloc[0]
