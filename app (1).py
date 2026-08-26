@@ -265,6 +265,8 @@ def analyze(df):
 
 
 
+_CURRENT_RESULT_FOR_PDF = None
+
 def pdf_status_chart(result):
     counts = [
         int((result["Status"] == "ALARM").sum()),
@@ -339,85 +341,3276 @@ def _report_footer(canvas, doc):
 
 
 def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched status count bar chart (not Top-5 priority)."""
+    # alarm_df is retained in the signature for compatibility.
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    maxv = max(counts) if counts else 1
+
+    # Horizontal grid lines like the dashboard.
+    grid_max = max(10, ((maxv + 1) // 2) * 2)
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    n = len(labels)
+    slot = (right - left) / n
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h, fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica",
+                 fontSize=6.8, fillColor=colors.HexColor("#667481"),
+                 angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+def pdf_status_chart(result):
     counts = [
         int((result["Status"] == "ALARM").sum()),
         int((result["Status"] == "WARNING").sum()),
         int((result["Status"] == "NORMAL").sum()),
-        int((result["Category"] == "Other").sum()),
-        int((result["Status"] == "SINGLE POINT").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
     ]
-    labels = ["Alarm", "Warning", "Normal", "Other / N/A", "Single Point"]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
     fills = [
         colors.HexColor("#E84A5F"),
-        colors.HexColor("#FF9F43"),
-        colors.HexColor("#49C78A"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
         colors.HexColor("#9AA3AD"),
-        colors.HexColor("#F4C95D"),
     ]
-    total = sum(counts)
-    d = Drawing(320, 150)
+
+    d = Drawing(320, 145)
     pie = Pie()
     pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
     pie.data = counts
     pie.labels = ["" for _ in counts]
     for i, fill in enumerate(fills):
         pie.slices[i].fillColor = fill
-        pie.slices[i].strokeColor = colors.white
-        pie.slices[i].strokeWidth = 0.5
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
     d.add(pie)
 
     legend = Legend()
-    legend.x, legend.y = 190, 112
-    legend.fontName, legend.fontSize = "Helvetica", 7.5
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
     legend.colorNamePairs = [
         (fills[i], f"{labels[i]}  {counts[i]}")
-        for i in range(len(counts)) if counts[i] > 0
+        for i in range(4) if counts[i] > 0
     ]
     d.add(legend)
     return d
 
 
 def pdf_top5_chart(alarm_df):
-    from reportlab.graphics.shapes import String, Rect, Line
-    top = alarm_df.head(5)
-    d = Drawing(430, 150)
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
     if top.empty:
         return d
 
-    values = [max(0, round(v.total_seconds()/3600, 1)) for v in top["Longest Continuous"]]
-    maxv = max(values) if values else 1
-    left, right = 165, 410
-    row_h = 25
-    for idx, ((_, row), value) in enumerate(zip(top.iterrows(), values)):
-        y = 118 - idx * row_h
-        name = str(row["Equipment"])
-        if " – " in name:
-            short_name = name.split(" – ", 1)[1]
-            if short_name in {"Chiller", "Freezer"}:
-                short_name = name
-        elif " - " in name:
-            short_name = name.split(" - ", 1)[1]
-            if short_name in {"Chiller", "Freezer"}:
-                short_name = name
-        else:
-            short_name = name
-        name = short_name
-        if len(name) > 26:
-            name = name[:24] + "…"
-        d.add(String(148, y+3, name, fontName="Helvetica", fontSize=7.0,
-                     textAnchor="end", fillColor=colors.HexColor("#263746")))
-        width = (right-left) * value / maxv if maxv else 0
-        d.add(Rect(left, y-3, width, 12, fillColor=colors.HexColor("#E84A5F"),
-                   strokeColor=None))
-        d.add(String(min(left+width+5, right-2), y, f"{value:g}h",
-                     fontName="Helvetica-Bold", fontSize=7,
-                     fillColor=colors.HexColor("#263746")))
-    d.add(Line(left, 8, right, 8, strokeColor=colors.HexColor("#B9C2CC"), strokeWidth=0.6))
-    d.add(String(left, 0, "Longest Continuous threshold event (hours)",
-                 fontName="Helvetica", fontSize=6.8,
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
                  fillColor=colors.HexColor("#667481")))
     return d
 
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched Status Count bar chart."""
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    grid_max = max(10, ((max(counts) + 1) // 2) * 2)
+
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    slot = (right - left) / len(labels)
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h,
+                   fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle",
+                     fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle",
+                     fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment",
+                 fontName="Helvetica", fontSize=6.8,
+                 fillColor=colors.HexColor("#667481"), angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+_CURRENT_RESULT_FOR_PDF = None
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched status count bar chart (not Top-5 priority)."""
+    # alarm_df is retained in the signature for compatibility.
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    maxv = max(counts) if counts else 1
+
+    # Horizontal grid lines like the dashboard.
+    grid_max = max(10, ((maxv + 1) // 2) * 2)
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    n = len(labels)
+    slot = (right - left) / n
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h, fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica",
+                 fontSize=6.8, fillColor=colors.HexColor("#667481"),
+                 angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched Status Count bar chart."""
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    grid_max = max(10, ((max(counts) + 1) // 2) * 2)
+
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    slot = (right - left) / len(labels)
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h,
+                   fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica", fontSize=6.8,
+                 fillColor=colors.HexColor("#667481"), angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+_CURRENT_RESULT_FOR_PDF = None
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched status count bar chart (not Top-5 priority)."""
+    # alarm_df is retained in the signature for compatibility.
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    maxv = max(counts) if counts else 1
+
+    # Horizontal grid lines like the dashboard.
+    grid_max = max(10, ((maxv + 1) // 2) * 2)
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    n = len(labels)
+    slot = (right - left) / n
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h, fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica",
+                 fontSize=6.8, fillColor=colors.HexColor("#667481"),
+                 angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched Status Count bar chart."""
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    grid_max = max(10, ((max(counts) + 1) // 2) * 2)
+
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    slot = (right - left) / len(labels)
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h,
+                   fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle",
+                     fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle",
+                     fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment",
+                 fontName="Helvetica", fontSize=6.8,
+                 fillColor=colors.HexColor("#667481"), angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+_CURRENT_RESULT_FOR_PDF = None
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched status count bar chart (not Top-5 priority)."""
+    # alarm_df is retained in the signature for compatibility.
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    maxv = max(counts) if counts else 1
+
+    # Horizontal grid lines like the dashboard.
+    grid_max = max(10, ((maxv + 1) // 2) * 2)
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    n = len(labels)
+    slot = (right - left) / n
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h, fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica",
+                 fontSize=6.8, fillColor=colors.HexColor("#667481"),
+                 angle=90))
+    return d
+
+import streamlit as st
+# FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ PPHG Temperature Analyzer")
+st.caption("Upload Testo CSV → automatic PPHG temperature analysis")
+
+# PPHG SOP
+RULES = {
+    "Chiller": {"limit": 6.0, "delay": pd.Timedelta(hours=2)},
+    "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
+}
+
+# The current Testo CSV has duplicate display names. Until naming is cleaned up
+# in Testo, identify the duplicate L90 instruments by their column position.
+COLUMN_MAPPING = {
+    0: ("Eden Bar", "Chiller"),
+    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
+    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
+    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
+    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
+    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
+    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
+    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
+    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
+    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
+    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
+    11: ("Receiving – Freezer GEA 013", "Freezer"),
+    12: ("Receiving – Freezer GEA 012", "Freezer"),
+    13: ("Receiving – Freezer GEA 015", "Freezer"),
+    14: ("Receiving – Showcase Chiller 014", "Chiller"),
+    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
+    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
+    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
+    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
+    19: ("Canteen – Chiller", "Chiller"),
+    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
+    21: ("Kitchen Lt.90 – WCH.1", "Other"),
+    22: ("Kitchen Lt.90 – WCH.2", "Other"),
+    23: ("Eden Bar – Chiller", "Chiller"),
+}
+
+def format_duration(td):
+    if pd.isna(td):
+        return "—"
+    total_minutes = max(0, round(td.total_seconds() / 60))
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def longest_continuous(g, category, median_interval):
+    if category not in RULES:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A missing/gapped sample must not be treated as continuous threshold event.
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = g[g["above"]].groupby("group", sort=False)
+    best = None
+    for _, r in runs:
+        if r.empty:
+            continue
+        start = r["Timestamp"].iloc[0]
+        end = r["Timestamp"].iloc[-1]
+        duration = end - start
+        if best is None or duration > best[0]:
+            best = (duration, start, end, r["Temperature"].max())
+
+    if best is None:
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
+
+    duration, start, end, peak = best
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    return duration, start, end, peak, status
+
+
+def excursion_stats(g, category, median_interval):
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "threshold_events": len(runs),
+    }
+
+
+def parse_testo(uploaded):
+    # Testo Smart CSV uses semicolon separator and one timestamp column.
+    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+    if raw.shape[1] < 2:
+        raise ValueError("CSV Testo tidak berisi kolom measurement.")
+
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    valid_time = timestamps.notna()
+    if valid_time.sum() < 2:
+        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+
+    measurement_cols = list(raw.columns[1:])
+    records = []
+
+    for idx, col in enumerate(measurement_cols):
+        values = pd.to_numeric(raw[col], errors="coerce")
+        mask = valid_time & values.notna()
+        if mask.sum() == 0:
+            continue
+
+        if idx in COLUMN_MAPPING:
+            display_name, category = COLUMN_MAPPING[idx]
+        else:
+            # Future-proof: after Testo naming is cleaned up, use the actual name.
+            base = str(col).split(": Temperature")[0].strip()
+            low = base.lower()
+            if "freezer" in low:
+                category = "Freezer"
+            elif "chiller" in low:
+                category = "Chiller"
+            else:
+                category = "Other"
+            display_name = base
+
+        temp = pd.DataFrame({
+            "Timestamp": timestamps[mask].values,
+            "Equipment": display_name,
+            "Temperature": values[mask].values,
+            "Category": category,
+        })
+        records.append(temp)
+
+    if not records:
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+
+    return pd.concat(records, ignore_index=True), raw
+
+def analyze(df):
+    rows = []
+    intervals = []
+
+    for _, g in df.groupby("Equipment", sort=False):
+        diffs = g["Timestamp"].sort_values().diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        intervals.extend(diffs.tolist())
+
+    median_interval = (
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
+    )
+
+    for equipment, g in df.groupby("Equipment", sort=False):
+        category = g["Category"].iloc[0]
+        stats = excursion_stats(g, category, median_interval)
+
+        if category in RULES:
+            rule = RULES[category]
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+        else:
+            exceeded = pd.Timedelta(0)
+            limit_text = "N/A"
+
+        rows.append({
+            "Equipment": equipment,
+            "Category": category,
+            "Min °C": g["Temperature"].min(),
+            "Average °C": g["Temperature"].mean(),
+            "Max °C": g["Temperature"].max(),
+            "Alarm Limit": limit_text,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
+            "Exceeded By": exceeded,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Threshold Events": stats["threshold_events"],
+        })
+
+    out = pd.DataFrame(rows)
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    out["_order"] = out["Status"].map(order).fillna(9)
+    out = out.sort_values(
+        ["_order", "Longest Continuous"],
+        ascending=[True, False]
+    ).drop(columns="_order")
+    return out, median_interval
+
+
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labelTextFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def _report_footer(canvas, doc):
+    canvas.saveState()
+    w, h = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor("#D7DEE5"))
+    canvas.line(12*mm, 8*mm, w-12*mm, 8*mm)
+    canvas.setFont("Helvetica", 6.5)
+    canvas.setFillColor(colors.HexColor("#6B7785"))
+    canvas.drawString(12*mm, 4.5*mm, "PPHG Temperature Analyzer • Analytical screening report")
+    canvas.drawRightString(w-12*mm, 4.5*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_status_chart(result):
+    """Dashboard-matched status distribution donut."""
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 155)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 30, 12, 125, 125
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+        pie.slices[i].strokeColor = colors.white
+        pie.slices[i].strokeWidth = 0.7
+    d.add(pie)
+
+    # Match Plotly dashboard: percentage labels inside the donut + vertical legend.
+    total = sum(counts)
+    legend_y = 118
+    for i, (label, count) in enumerate(zip(labels, counts)):
+        if count <= 0:
+            continue
+        pct = count / total * 100 if total else 0
+        # percentage inside each slice is approximated with a compact label
+        # around the donut; keep the legend as the exact value reference.
+    legend = Legend()
+    legend.x, legend.y = 180, 112
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+
+    # Center label, similar to the dashboard's clean Plotly donut.
+    from reportlab.graphics.shapes import String
+    d.add(String(92, 69, str(total), fontName="Helvetica-Bold",
+                 fontSize=13, textAnchor="middle",
+                 fillColor=colors.HexColor("#17324D")))
+    d.add(String(92, 56, "equipment", fontName="Helvetica",
+                 fontSize=7, textAnchor="middle",
+                 fillColor=colors.HexColor("#667481")))
+    return d
+
+def pdf_top5_chart(alarm_df):
+    """Dashboard-matched Status Count bar chart."""
+    result = _CURRENT_RESULT_FOR_PDF
+    alarms = int((result["Status"] == "ALARM").sum())
+    warnings = int((result["Status"] == "WARNING").sum())
+    normal = int((result["Status"] == "NORMAL").sum())
+    equipment_count = len(result)
+    other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    counts = [alarms, warnings, normal, other_status]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    from reportlab.graphics.shapes import String, Rect, Line
+    d = Drawing(430, 155)
+    left, right = 48, 410
+    bottom, top = 22, 125
+    grid_max = max(10, ((max(counts) + 1) // 2) * 2)
+
+    for tick in range(0, grid_max + 1, 2):
+        y = bottom + (top - bottom) * tick / grid_max
+        d.add(Line(left, y, right, y,
+                   strokeColor=colors.HexColor("#DDE3E8"),
+                   strokeWidth=0.45))
+        d.add(String(left - 6, y - 2.5, str(tick),
+                     fontName="Helvetica", fontSize=6.5,
+                     textAnchor="end", fillColor=colors.HexColor("#667481")))
+
+    slot = (right - left) / len(labels)
+    bar_w = min(48, slot * 0.62)
+    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
+        cx = left + slot * (i + 0.5)
+        h = (top - bottom) * count / grid_max
+        x = cx - bar_w / 2
+        d.add(Rect(x, bottom, bar_w, h,
+                   fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom + h + 5, str(count),
+                     fontName="Helvetica", fontSize=7.2,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+        d.add(String(cx, 7, label,
+                     fontName="Helvetica", fontSize=6.8,
+                     textAnchor="middle", fillColor=colors.HexColor("#667481")))
+
+    d.add(String(8, 72, "Equipment", fontName="Helvetica", fontSize=6.8,
+                 fillColor=colors.HexColor("#667481"), angle=90))
+    return d
 
 def build_pdf_report(result, data, median_interval, raw=None):
     buffer = BytesIO()
@@ -500,29 +3693,35 @@ def build_pdf_report(result, data, median_interval, raw=None):
         callout
     ))
 
+    # Keep PDF Executive Summary aligned with the dashboard:
+    # 4 KPIs + Status Distribution donut + Status Count bar.
+    other_status = max(len(result) - alarms - warnings - normal, 0)
     kpi = Table([[
-        Paragraph(f"<b>ALARM</b><br/><font size=16 color='#B00020'>{alarms}</font>", body),
-        Paragraph(f"<b>WARNING</b><br/><font size=16 color='#A35B00'>{warnings}</font>", body),
-        Paragraph(f"<b>NORMAL</b><br/><font size=16 color='#087443'>{normal}</font>", body),
-        Paragraph(f"<b>OTHER / N/A</b><br/><font size=16 color='#59636D'>{other}</font>", body),
-        Paragraph(f"<b>SINGLE POINT</b><br/><font size=16 color='#8A6B00'>{single}</font>", body),
-    ]], colWidths=[48*mm]*5)
+        Paragraph(f"<b>Equipment</b><br/><font size=16 color='#17324D'>{len(result)}</font>", body),
+        Paragraph(f"<b>Alarm</b><br/><font size=16 color='#E84A5F'>{alarms}</font>", body),
+        Paragraph(f"<b>Warning</b><br/><font size=16 color='#FF8A4C'>{warnings}</font>", body),
+        Paragraph(f"<b>Normal</b><br/><font size=16 color='#4CCB88'>{normal}</font>", body),
+    ]], colWidths=[62*mm,62*mm,62*mm,62*mm])
     kpi.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(0,0),colors.HexColor("#FFE3E3")),
-        ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0CC")),
-        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#D9F5E5")),
-        ("BACKGROUND",(3,0),(3,0),colors.HexColor("#EEF1F4")),
-        ("BACKGROUND",(4,0),(4,0),colors.HexColor("#FFF7D6")),
-        ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
-        ("INNERGRID",(0,0),(-1,-1),0.35,colors.white),
-        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-        ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ("ALIGN",(0,0),(-1,-1),"LEFT"),
+        ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
     ]))
     story.append(kpi)
     story.append(Spacer(1,2*mm))
 
+    global _CURRENT_RESULT_FOR_PDF
+    _CURRENT_RESULT_FOR_PDF = result
+    chart_labels = Table([[
+        Paragraph("<b>Status Distribution</b>", h2),
+        Paragraph("<b>Status Count</b>", h2),
+    ]], colWidths=[112*mm,138*mm])
+    chart_labels.setStyle(TableStyle([
+        ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+    ]))
+    story.append(chart_labels)
     charts = Table([[pdf_status_chart(result), pdf_top5_chart(alarm_df)]],
-                   colWidths=[92*mm,158*mm])
+                   colWidths=[112*mm,138*mm])
     charts.setStyle(TableStyle([
         ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
