@@ -1088,7 +1088,21 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-        pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
+        st.markdown("---")
+        st.subheader("📄 PDF Report")
+        try:
+            pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
+            st.download_button(
+                label="📄 Download PPHG PDF Report",
+                data=pdf_bytes,
+                file_name="PPHG_Temperature_Analysis_Report.pdf",
+                mime="application/pdf",
+                type="primary",
+                width="stretch",
+                key="download_pphg_pdf",
+            )
+        except Exception as pdf_error:
+            st.error(f"PDF report gagal dibuat: {pdf_error}")
         st.download_button(
             "📄 Download PPHG PDF Report",
             pdf_bytes,
