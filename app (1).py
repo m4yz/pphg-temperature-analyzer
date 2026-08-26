@@ -612,6 +612,9 @@ if uploaded:
                 textposition="inside",
                 textinfo="percent",
                 hovertemplate="%{label}: %{value} equipment<extra></extra>",
+                marker=dict(
+                    colors=["#E84A5F", "#FF8A4C", "#4CCB88", "#9AA3AD"]
+                ),
             )
             donut.update_layout(
                 margin=dict(l=10, r=10, t=20, b=10),
@@ -636,6 +639,11 @@ if uploaded:
             bar.update_traces(
                 textposition="outside",
                 hovertemplate="%{x}: %{y} equipment<extra></extra>",
+                marker_color=[
+                    {"Alarm": "#E84A5F", "Warning": "#FF8A4C",
+                     "Normal": "#4CCB88", "Other / N/A": "#9AA3AD"}[s]
+                    for s in status_df["Status"]
+                ],
             )
             bar.update_layout(
                 margin=dict(l=10, r=10, t=20, b=10),
@@ -702,6 +710,57 @@ if uploaded:
         st.divider()
         st.subheader("PPHG Analysis")
 
+        # Keep the analysis filters here. They do not affect the Executive Summary;
+        # they only control which rows are shown in the detailed analysis table.
+        f1, f2, f3 = st.columns(3)
+        category_options = ["All"] + sorted(
+            result["Category"].dropna().unique().tolist()
+        )
+        status_options = ["All", "ALARM", "WARNING", "NORMAL", "SINGLE POINT", "N/A"]
+
+        selected_category = f1.selectbox(
+            "Filter by category",
+            category_options,
+            key="analysis_category_filter",
+        )
+        selected_status = f2.selectbox(
+            "Filter by status",
+            status_options,
+            key="analysis_status_filter",
+        )
+
+        equipment_options = ["All"] + sorted(
+            result["Equipment"].dropna().unique().tolist()
+        )
+        selected_equipment = f3.selectbox(
+            "Filter by equipment",
+            equipment_options,
+            key="analysis_equipment_filter",
+        )
+
+        filtered_result = result.copy()
+        if selected_category != "All":
+            filtered_result = filtered_result[
+                filtered_result["Category"] == selected_category
+            ]
+        if selected_status != "All":
+            if selected_status == "N/A":
+                filtered_result = filtered_result[
+                    filtered_result["Category"] == "Other"
+                ]
+            else:
+                filtered_result = filtered_result[
+                    filtered_result["Status"] == selected_status
+                ]
+        if selected_equipment != "All":
+            filtered_result = filtered_result[
+                filtered_result["Equipment"] == selected_equipment
+            ]
+
+        st.caption(
+            f"Showing **{len(filtered_result)} of {len(result)} equipment**."
+        )
+
         # PPHG criteria are shown as highlights instead of a table column.
         st.markdown(
             """
@@ -714,7 +773,7 @@ if uploaded:
             unsafe_allow_html=False,
         )
 
-        show = result.copy()
+        show = filtered_result.copy()
         for col in ["Min °C", "Average °C", "Max °C", "Peak During Excursion °C"]:
             show[col] = show[col].map(
                 lambda x: f"{x:.1f}" if pd.notna(x) else "—"
@@ -754,9 +813,13 @@ if uploaded:
         st.divider()
         st.subheader("Equipment Detail")
 
+        if filtered_result.empty:
+            st.info("No equipment matches the selected filters.")
+            st.stop()
+
         selected = st.selectbox(
             "Select equipment",
-            result["Equipment"].tolist()
+            filtered_result["Equipment"].tolist()
         )
 
         selected_result = result[result["Equipment"] == selected].iloc[0]
