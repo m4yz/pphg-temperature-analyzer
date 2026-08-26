@@ -164,6 +164,7 @@ def excursion_stats(g, category, median_interval):
     }
 
 
+@st.cache_data(show_spinner=False)
 def parse_testo(uploaded):
     # Testo Smart CSV uses semicolon separator and one timestamp column.
     raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
@@ -212,6 +213,7 @@ def parse_testo(uploaded):
 
     return pd.concat(records, ignore_index=True), raw
 
+@st.cache_data(show_spinner=False)
 def analyze(df):
     rows = []
     intervals = []
@@ -783,8 +785,9 @@ uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 
 if uploaded:
     try:
-        data, raw = parse_testo(uploaded)
-        result, median_interval = analyze(data)
+        with st.spinner("Reading Testo CSV and analyzing equipment..."):
+            data, raw = parse_testo(uploaded)
+            result, median_interval = analyze(data)
 
         equipment_count = result["Equipment"].nunique()
         st.success(
@@ -1057,6 +1060,9 @@ if uploaded:
 
         selected_result = result[result["Equipment"] == selected].iloc[0]
         trend = data[data["Equipment"] == selected].copy()
+        if len(trend) > 2000:
+            step = max(1, len(trend) // 2000)
+            trend = trend.iloc[::step].copy()
 
         fig = px.line(
             trend,
@@ -1088,7 +1094,6 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-        st.markdown("---")
         st.markdown("---")
         st.subheader("📄 PDF Report")
         st.caption("Generate the PDF only when needed to keep the dashboard responsive.")
