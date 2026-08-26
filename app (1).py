@@ -500,11 +500,12 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("WARNING", warning, "#FFF0D9", "#D97706"),
         ("NORMAL", normal, "#DDF5E9", "#12A36A"),
     ]
-    kdata = []
-    for label, value, bg, fg in kpis:
-        kdata.append([
-            Paragraph(f"<b>{label}</b><br/><font size=17 color='{fg}'>{value}</font>", body)
-        ])
+    kdata = [[
+        Paragraph(f"<b>{kpis[0][0]}</b><br/><font size=17 color='{kpis[0][3]}'>{kpis[0][1]}</font>", body),
+        Paragraph(f"<b>{kpis[1][0]}</b><br/><font size=17 color='{kpis[1][3]}'>{kpis[1][1]}</font>", body),
+        Paragraph(f"<b>{kpis[2][0]}</b><br/><font size=17 color='{kpis[2][3]}'>{kpis[2][1]}</font>", body),
+        Paragraph(f"<b>{kpis[3][0]}</b><br/><font size=17 color='{kpis[3][3]}'>{kpis[3][1]}</font>", body),
+    ]]
     kt = Table(kdata, colWidths=[44.5*mm]*4, rowHeights=[15*mm])
     kt.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,0),colors.HexColor(kpis[0][2])),
