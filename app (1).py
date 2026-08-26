@@ -93,7 +93,12 @@ def longest_continuous(g, category, median_interval):
         return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
 
     duration, start, end, peak = best
-    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    if pd.isna(duration) or duration <= pd.Timedelta(0):
+        status = "NORMAL"
+    elif duration >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
     return duration, start, end, peak, status
 
 def parse_testo(uploaded):
@@ -481,6 +486,7 @@ def build_pdf_report(result, data, median_interval):
         ))
 
     if warnings:
+        story.append(PageBreak())
         story.append(Paragraph("WARNING Equipment", h1))
         warning_df = result[result["Status"] == "WARNING"].copy()
         warning_df["excess_min"] = warning_df["Exceeded By"].dt.total_seconds()/60
