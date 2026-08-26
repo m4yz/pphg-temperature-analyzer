@@ -10,6 +10,10 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 )
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.legends import Legend
 
 st.set_page_config(page_title="PPHG Temperature Analyzer", page_icon="🌡️", layout="wide")
 
@@ -96,6 +100,123 @@ def longest_continuous(g, category, median_interval):
     status = "ALARM" if duration >= rule["delay"] else "WARNING"
     return duration, start, end, peak, status
 
+
+def excursion_stats(g, category, median_interval):
+    """Calculate continuous excursions, recurrence count and recovery intervals."""
+    if category not in RULES:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "excursion_count": 0,
+            "avg_excursion": pd.Timedelta(0), "avg_recovery": pd.NaT,
+        }
+
+    rule = RULES[category]
+    g = g.sort_values("Timestamp").copy()
+    g["above"] = g["Temperature"] >= rule["limit"]
+
+    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    g["gap"] = g["Timestamp"].diff() > max_gap
+    g["group"] = (g["gap"] | ~g["above"]).cumsum()
+
+    runs = []
+    for _, r in g[g["above"]].groupby("group", sort=False):
+        if r.empty:
+            continue
+        runs.append({
+            "start": r["Timestamp"].iloc[0],
+            "end": r["Timestamp"].iloc[-1],
+            "duration": r["Timestamp"].iloc[-1] - r["Timestamp"].iloc[0],
+            "peak": r["Temperature"].max(),
+        })
+
+    if not runs:
+        return {
+            "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "excursion_count": 0,
+            "avg_excursion": pd.Timedelta(0), "avg_recovery": pd.NaT,
+        }
+
+    best = max(runs, key=lambda x: x["duration"])
+    recovery = [
+        nxt["start"] - prev["end"]
+        for prev, nxt in zip(runs, runs[1:])
+        if nxt["start"] - prev["end"] > pd.Timedelta(0)
+    ]
+    avg_recovery = (
+        pd.Series(recovery, dtype="timedelta64[ns]").mean()
+        if recovery else pd.NaT
+    )
+
+    status = "ALARM" if best["duration"] >= rule["delay"] else "WARNING"
+
+    return {
+        "duration": best["duration"],
+        "start": best["start"],
+        "end": best["end"],
+        "peak": best["peak"],
+        "status": status,
+        "excursion_count": len(runs),
+        "avg_excursion": pd.Series(
+            [r["duration"] for r in runs], dtype="timedelta64[ns]"
+        ).mean(),
+        "avg_recovery": avg_recovery,
+    }
+
+
+def recommendation_for_row(row):
+    category = row["Category"]
+    peak = row["Peak During Excursion °C"]
+    duration = row["Longest Continuous"]
+    repeated = int(row.get("Excursion Count", 0))
+
+    if category == "Freezer":
+        if pd.notna(peak) and peak >= 0:
+            text = "Check refrigeration performance, door/door-seal condition, defrost cycle, loading and product obstruction."
+        else:
+            text = "Review door opening/loading, refrigeration performance, condenser/coil condition and defrost operation."
+    elif category == "Chiller":
+        text = "Review door opening/loading, ambient exposure, condenser/coil condition, airflow and temperature-control performance."
+    else:
+        text = "Map the measurement point to the correct equipment category."
+
+    if repeated >= 3:
+        text += " Repeated excursions also warrant review of operating practices and recurrence pattern."
+    if duration > pd.Timedelta(hours=24):
+        text += " Prioritize this unit for urgent operational review due to the prolonged excursion."
+    return text
+
+
+def data_quality_report(raw, data, result, median_interval):
+    timestamp_col = raw.columns[0]
+    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+    missing_timestamps = int(timestamps.isna().sum())
+    missing_temperature_values = sum(
+        int(pd.to_numeric(raw[c], errors="coerce").isna().sum())
+        for c in raw.columns[1:]
+    )
+
+    duplicate_timestamp_rows = 0
+    irregular_intervals = 0
+    for _, g in data.groupby("Equipment", sort=False):
+        ts = g["Timestamp"].sort_values()
+        duplicate_timestamp_rows += int(ts.duplicated().sum())
+        diffs = ts.diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        if not diffs.empty:
+            irregular_intervals += int((diffs > median_interval * 1.5).sum())
+
+    return {
+        "rows": len(raw),
+        "measurement_columns": max(len(raw.columns) - 1, 0),
+        "valid_timestamps": int(timestamps.notna().sum()),
+        "missing_timestamps": missing_timestamps,
+        "missing_temperature_values": missing_temperature_values,
+        "duplicate_timestamp_rows": duplicate_timestamp_rows,
+        "irregular_intervals": irregular_intervals,
+        "other_equipment": int((result["Category"] == "Other").sum()),
+    }
+
+
 def parse_testo(uploaded):
     # Testo Smart CSV uses semicolon separator and one timestamp column.
     raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
@@ -146,34 +267,26 @@ def parse_testo(uploaded):
 
 def analyze(df):
     rows = []
-    # Calculate sampling interval within each equipment series. The parsed
-    # dataframe contains all equipment stacked together, so taking a global
-    # diff would produce many zero-minute differences between equipment rows.
-    per_equipment_intervals = []
+    intervals = []
+
     for _, g in df.groupby("Equipment", sort=False):
         diffs = g["Timestamp"].sort_values().diff().dropna()
         diffs = diffs[diffs > pd.Timedelta(0)]
-        if not diffs.empty:
-            per_equipment_intervals.extend(diffs.tolist())
+        intervals.extend(diffs.tolist())
+
     median_interval = (
-        pd.Series(per_equipment_intervals).median()
-        if per_equipment_intervals
-        else pd.Timedelta(minutes=5)
+        pd.Series(intervals).median()
+        if intervals else pd.Timedelta(minutes=5)
     )
 
     for equipment, g in df.groupby("Equipment", sort=False):
         category = g["Category"].iloc[0]
-        duration, start, end, peak, status = longest_continuous(
-            g, category, median_interval
-        )
+        stats = excursion_stats(g, category, median_interval)
 
         if category in RULES:
             rule = RULES[category]
-            exceeded = max(duration - rule["delay"], pd.Timedelta(0))
-            limit_text = (
-                f"≥{rule['limit']:g}°C / "
-                f"{rule['delay'].total_seconds()/3600:g}h"
-            )
+            exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
+            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
         else:
             exceeded = pd.Timedelta(0)
             limit_text = "N/A"
@@ -185,12 +298,15 @@ def analyze(df):
             "Average °C": g["Temperature"].mean(),
             "Max °C": g["Temperature"].max(),
             "Alarm Limit": limit_text,
-            "Longest Start": start,
-            "Longest End": end,
-            "Longest Continuous": duration,
+            "Longest Start": stats["start"],
+            "Longest End": stats["end"],
+            "Longest Continuous": stats["duration"],
             "Exceeded By": exceeded,
-            "Status": status,
-            "Peak During Excursion °C": peak,
+            "Status": stats["status"],
+            "Peak During Excursion °C": stats["peak"],
+            "Excursion Count": stats["excursion_count"],
+            "Avg Excursion": stats["avg_excursion"],
+            "Avg Recovery Interval": stats["avg_recovery"],
         })
 
     out = pd.DataFrame(rows)
@@ -203,346 +319,367 @@ def analyze(df):
     return out, median_interval
 
 
-def build_pdf_report(result, data, median_interval):
-    """Build a management-friendly PPHG temperature analysis PDF."""
+
+def pdf_status_chart(result):
+    counts = [
+        int((result["Status"] == "ALARM").sum()),
+        int((result["Status"] == "WARNING").sum()),
+        int((result["Status"] == "NORMAL").sum()),
+        int((result["Category"] == "Other").sum()),
+    ]
+    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
+    fills = [
+        colors.HexColor("#E84A5F"),
+        colors.HexColor("#FF8A4C"),
+        colors.HexColor("#4CCB88"),
+        colors.HexColor("#9AA3AD"),
+    ]
+
+    d = Drawing(320, 145)
+    pie = Pie()
+    pie.x, pie.y, pie.width, pie.height = 55, 8, 120, 120
+    pie.data = counts
+    pie.labels = ["" for _ in counts]
+    for i, fill in enumerate(fills):
+        pie.slices[i].fillColor = fill
+    pie.slices.strokeWidth = 0.5
+    pie.slices.strokeColor = colors.white
+    d.add(pie)
+
+    legend = Legend()
+    legend.x, legend.y = 190, 105
+    legend.fontName, legend.fontSize = "Helvetica", 8
+    legend.colorNamePairs = [
+        (fills[i], f"{labels[i]}  {counts[i]}")
+        for i in range(4) if counts[i] > 0
+    ]
+    d.add(legend)
+    return d
+
+
+def pdf_top5_chart(alarm_df):
+    top = alarm_df.head(5).iloc[::-1]
+    d = Drawing(430, 165)
+    if top.empty:
+        return d
+
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 120, 18, 285, 125
+    chart.data = [[
+        max(0, round(v.total_seconds() / 3600, 1))
+        for v in top["Longest Continuous"]
+    ]]
+    chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.valueLabelFormat = "%.0fh"
+    chart.categoryAxis.labels.fontSize = 6.5
+    chart.bars[0].fillColor = colors.HexColor("#E84A5F")
+    chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
+    chart.barWidth = 12
+    d.add(chart)
+    return d
+
+
+def build_pdf_report(result, data, median_interval, raw=None):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(A4),
-        rightMargin=10*mm,
-        leftMargin=10*mm,
-        topMargin=10*mm,
-        bottomMargin=10*mm,
+        buffer, pagesize=landscape(A4),
+        rightMargin=10*mm, leftMargin=10*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
         title="PPHG Temperature Analysis Report",
         author="PPHG Temperature Analyzer",
     )
 
     styles = getSampleStyleSheet()
-    title = ParagraphStyle(
-        "ReportTitle", parent=styles["Title"], fontSize=20,
-        leading=24, textColor=colors.HexColor("#17324D"),
-        alignment=TA_LEFT, spaceAfter=5*mm
-    )
-    h1 = ParagraphStyle(
-        "H1", parent=styles["Heading1"], fontSize=13,
-        leading=16, textColor=colors.HexColor("#17324D"),
-        spaceBefore=4*mm, spaceAfter=3*mm
-    )
-    body = ParagraphStyle(
-        "Body", parent=styles["BodyText"], fontSize=8.5,
-        leading=12, spaceAfter=2*mm
-    )
-    small = ParagraphStyle(
-        "Small", parent=styles["BodyText"], fontSize=7,
-        leading=9
-    )
-    note = ParagraphStyle(
-        "Note", parent=styles["BodyText"], fontSize=8,
-        leading=11, textColor=colors.HexColor("#555555")
-    )
+    title = ParagraphStyle("ReportTitle", parent=styles["Title"], fontSize=20,
+                            leading=24, textColor=colors.HexColor("#17324D"),
+                            alignment=TA_LEFT, spaceAfter=5*mm)
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontSize=13,
+                        leading=16, textColor=colors.HexColor("#17324D"),
+                        spaceBefore=4*mm, spaceAfter=3*mm)
+    body = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=8.5,
+                          leading=12, spaceAfter=2*mm)
+    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=6.8, leading=8.5)
+    note = ParagraphStyle("Note", parent=styles["BodyText"], fontSize=8,
+                          leading=10, textColor=colors.HexColor("#4D5B66"))
+    conclusion = ParagraphStyle("Conclusion", parent=body, fontSize=9, leading=13,
+                                backColor=colors.HexColor("#EEF5FA"),
+                                borderColor=colors.HexColor("#C7DCEB"),
+                                borderWidth=0.5, borderPadding=7)
 
-    story = []
-    start = data["Timestamp"].min()
-    end = data["Timestamp"].max()
-    total = len(result)
     alarms = int((result["Status"] == "ALARM").sum())
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
     other = int((result["Category"] == "Other").sum())
+    urgent = int((
+        result.loc[result["Status"] == "ALARM", "Longest Continuous"]
+        > pd.Timedelta(hours=24)
+    ).sum())
 
-    story.append(Paragraph("PPHG Temperature Analysis Report", title))
-    story.append(Paragraph(
-        f"<b>Measurement period:</b> {start:%d-%m-%Y %H:%M} to {end:%d-%m-%Y %H:%M}"
-        f"&nbsp;&nbsp;&nbsp; <b>Sampling interval:</b> "
-        f"≈ {median_interval.total_seconds() / 60:.0f} minutes",
-        body
-    ))
+    alarm_df = result[result["Status"] == "ALARM"].sort_values(
+        ["Exceeded By", "Longest Continuous"], ascending=[False, False]
+    ).copy()
 
-    # Executive summary
-    story.append(Paragraph("1. Executive Summary", h1))
-    summary_data = [
-        ["Equipment", "Alarm", "Warning", "Normal", "Other / N/A"],
-        [str(total), str(alarms), str(warnings), str(normal), str(other)],
-    ]
-    t = Table(summary_data, colWidths=[35*mm]*5)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTNAME", (0,1), (-1,1), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 8.5),
-        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#B8C2CC")),
-        ("BACKGROUND", (0,1), (-1,1), colors.HexColor("#F4F7F9")),
-        ("TOPPADDING", (0,0), (-1,-1), 5),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-    ]))
-    story.append(t)
-    story.append(Spacer(1, 3*mm))
+    quality = data_quality_report(raw, data, result, median_interval) if raw is not None else None
+    story = []
 
-    if alarms:
-        alarm_df = result[result["Status"] == "ALARM"].copy()
-        alarm_df["excess_min"] = alarm_df["Exceeded By"].dt.total_seconds()/60
-        alarm_df = alarm_df.sort_values(
-            ["excess_min", "Longest Continuous"], ascending=[False, False]
-        )
-        top = alarm_df.head(5)
-        bullets = [
-            f"<b>{r['Equipment']}</b>: continuous excursion "
-            f"{format_duration(r['Longest Continuous'])}, exceeded PPHG delay by "
-            f"<b>{format_duration(r['Exceeded By'])}</b>, peak "
-            f"{r['Peak During Excursion °C']:.1f}°C."
-            for _, r in top.iterrows()
-        ]
-        story.append(Paragraph(
-            "<b>Key finding:</b> "
-            f"{alarms} equipment meet the PPHG alarm-duration criterion. "
-            "The five most significant excursions are:",
-            body
-        ))
-        for b in bullets:
-            story.append(Paragraph("• " + b, body))
-    elif warnings:
-        story.append(Paragraph(
-            f"<b>Key finding:</b> No equipment reached the PPHG alarm-duration "
-            f"criterion, but {warnings} equipment remain in warning status.",
-            body
-        ))
-    else:
-        story.append(Paragraph(
-            "No PPHG Chiller/Freezer alarm-duration excursions were identified.",
-            body
-        ))
-
+    # 1 Executive Summary
+    story.append(Paragraph("1. Executive Summary", title))
+    overall = "ATTENTION REQUIRED" if alarms else ("MONITOR" if warnings else "NORMAL")
+    text = (
+        f"<b>Overall Assessment: {overall}</b><br/>"
+        f"{len(result)} equipment analyzed. <b>{alarms}</b> ALARM, "
+        f"<b>{warnings}</b> WARNING and <b>{normal}</b> NORMAL. "
+        f"<b>{urgent}</b> alarm unit(s) have continuous excursions exceeding 24 hours "
+        f"and should receive priority operational review."
+    )
     if other:
-        story.append(Paragraph(
-            f"<b>Data limitation:</b> {other} measurement(s) are classified as "
-            "<b>Other</b> and are not assigned a Chiller/Freezer PPHG delay rule. "
-            "These should be mapped after Testo naming is made unique.",
-            note
-        ))
+        text += f" <b>{other}</b> point(s) are Other/N/A and require category mapping."
+    story.append(Paragraph(text, conclusion))
 
-    # Methodology
+    kpi = Table([[
+        Paragraph(f"<b>Equipment</b><br/><font size=16>{len(result)}</font>", body),
+        Paragraph(f"<b>Alarm</b><br/><font size=16 color='#B00020'>{alarms}</font>", body),
+        Paragraph(f"<b>Warning</b><br/><font size=16 color='#B05A00'>{warnings}</font>", body),
+        Paragraph(f"<b>Normal</b><br/><font size=16 color='#087443'>{normal}</font>", body),
+    ]], colWidths=[58*mm]*4)
+    kpi.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(0,0),colors.HexColor("#EEF5FA")),
+        ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFE5E5")),
+        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#FFF0CC")),
+        ("BACKGROUND",(3,0),(3,0),colors.HexColor("#D9F5E5")),
+        ("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
+        ("INNERGRID",(0,0),(-1,-1),0.3,colors.white),
+        ("ALIGN",(0,0),(-1,-1),"CENTER"),
+        ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7),
+    ]))
+    story.append(kpi)
+    story.append(Spacer(1,3*mm))
+
+    charts = Table([[pdf_status_chart(result), pdf_top5_chart(alarm_df)]],
+                   colWidths=[95*mm,165*mm])
+    charts.setStyle(TableStyle([
+        ("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
+        ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#E5E7EB")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+    ]))
+    story.append(charts)
+
+    story.append(Paragraph("Top 5 Priority Equipment", h1))
+    if alarm_df.empty:
+        story.append(Paragraph("No alarm equipment identified.", body))
+    else:
+        for rank, (_, r) in enumerate(alarm_df.head(5).iterrows(), 1):
+            priority = (
+                "<b>REVIEW URGENTLY – &gt;24h</b>"
+                if r["Longest Continuous"] > pd.Timedelta(hours=24)
+                else "<b>REVIEW</b>"
+            )
+            story.append(Paragraph(
+                f"<b>{rank}. {r['Equipment']}</b> — {priority}; "
+                f"continuous {format_duration(r['Longest Continuous'])}; "
+                f"exceeded by {format_duration(r['Exceeded By'])}; "
+                f"peak {r['Peak During Excursion °C']:.1f}°C.",
+                body
+            ))
+
+    # 2 Criteria
+    story.append(PageBreak())
     story.append(Paragraph("2. PPHG Assessment Criteria", h1))
     criteria = [
-        ["Category", "Temperature excursion", "Alarm delay", "Interpretation"],
-        ["Chiller", "≥ 6°C", "2 hours", "ALARM when continuous excursion ≥ 2h"],
-        ["Freezer", "≥ -15°C", "4 hours", "ALARM when continuous excursion ≥ 4h"],
+        ["Category","Temperature excursion","Alarm delay","Interpretation"],
+        ["Chiller","≥ 6°C","2 hours","ALARM when continuous excursion ≥ 2h"],
+        ["Freezer","≥ -15°C","4 hours","ALARM when continuous excursion ≥ 4h"],
     ]
-    ct = Table(criteria, colWidths=[35*mm, 45*mm, 35*mm, 105*mm])
+    ct = Table(criteria, colWidths=[35*mm,45*mm,35*mm,105*mm])
     ct.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#B8C2CC")),
-        ("FONTSIZE", (0,0), (-1,-1), 8),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING", (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#B8C2CC")),
+        ("FONTSIZE",(0,0),(-1,-1),8),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
     ]))
     story.append(ct)
-    story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "Longest Continuous is calculated from consecutive samples above the "
-        "applicable PPHG temperature threshold. A sampling gap is not treated as "
-        "continuous excursion. Exceeded By is the portion of the longest "
-        "continuous excursion beyond the applicable PPHG delay.",
+        "Longest Continuous is calculated from consecutive samples above the applicable "
+        "PPHG threshold. A sampling gap is not treated as continuous excursion. "
+        "Exceeded By is the portion beyond the applicable PPHG delay.",
         note
     ))
 
-    # Full analysis table
+    # 3 Equipment Analysis
     story.append(PageBreak())
     story.append(Paragraph("3. Equipment Analysis", h1))
-
-    headers = [
-        "Equipment", "Cat.", "Min °C", "Avg °C", "Max °C",
-        "Start", "End", "Continuous", "Exceeded", "Status"
-    ]
+    headers = ["Equipment","Cat.","Min °C","Avg °C","Max °C","Start","End",
+               "Continuous","Exceeded","Excursions","Status"]
     table_data = [headers]
     for _, r in result.iterrows():
-        start_txt = r["Longest Start"].strftime("%d-%m %H:%M") if pd.notna(r["Longest Start"]) else "—"
-        end_txt = r["Longest End"].strftime("%d-%m %H:%M") if pd.notna(r["Longest End"]) else "—"
+        start = r["Longest Start"].strftime("%d-%m %H:%M") if pd.notna(r["Longest Start"]) else "—"
+        end = r["Longest End"].strftime("%d-%m %H:%M") if pd.notna(r["Longest End"]) else "—"
         table_data.append([
-            Paragraph(str(r["Equipment"]), small),
-            str(r["Category"]),
-            f"{r['Min °C']:.1f}",
-            f"{r['Average °C']:.1f}",
-            f"{r['Max °C']:.1f}",
-            start_txt,
-            end_txt,
-            format_duration(r["Longest Continuous"]),
+            Paragraph(str(r["Equipment"]),small), str(r["Category"]),
+            f"{r['Min °C']:.1f}",f"{r['Average °C']:.1f}",f"{r['Max °C']:.1f}",
+            start,end,format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
-            ("N/A" if r["Category"] == "Other" else str(r["Status"])),
+            str(int(r["Excursion Count"])),
+            "N/A" if r["Category"]=="Other" else str(r["Status"])
         ])
-
-    col_widths = [52*mm, 18*mm, 15*mm, 15*mm, 15*mm, 27*mm,
-                  27*mm, 28*mm, 25*mm, 18*mm]
-    at = Table(table_data, colWidths=col_widths, repeatRows=1)
-    style_cmds = [
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 6.7),
-        ("FONTSIZE", (0,1), (-1,-1), 6.5),
-        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#C5CCD3")),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("ALIGN", (2,1), (9,-1), "CENTER"),
-        ("TOPPADDING", (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    at = Table(table_data,
+               colWidths=[48*mm,17*mm,14*mm,14*mm,14*mm,25*mm,25*mm,
+                          26*mm,24*mm,18*mm,17*mm], repeatRows=1)
+    styles_cmd = [
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("FONTSIZE",(0,0),(-1,0),6.2),("FONTSIZE",(0,1),(-1,-1),6.1),
+        ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"CENTER"),
+        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]
-    for i, (_, r) in enumerate(result.iterrows(), start=1):
-        if r["Status"] == "ALARM":
-            style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#FFD6D6")))
-            style_cmds.append(("TEXTCOLOR", (-1,i), (-1,i), colors.HexColor("#B00020")))
-            style_cmds.append(("FONTNAME", (-1,i), (-1,i), "Helvetica-Bold"))
-        elif r["Status"] == "WARNING":
-            style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#FFF0CC")))
-        elif r["Status"] == "NORMAL":
-            style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#D9F5E5")))
-    at.setStyle(TableStyle(style_cmds))
+    for i, (_, r) in enumerate(result.iterrows(), 1):
+        if r["Status"]=="ALARM":
+            styles_cmd += [("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFD6D6")),
+                           ("TEXTCOLOR",(-1,i),(-1,i),colors.HexColor("#B00020")),
+                           ("FONTNAME",(-1,i),(-1,i),"Helvetica-Bold")]
+        elif r["Status"]=="WARNING":
+            styles_cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFF0CC")))
+        elif r["Status"]=="NORMAL":
+            styles_cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#D9F5E5")))
+    at.setStyle(TableStyle(styles_cmd))
     story.append(at)
 
-    # Analysis / recommendations
+    # 4 Management Analysis
     story.append(PageBreak())
     story.append(Paragraph("4. Management Analysis & Recommended Actions", h1))
-
     if alarms:
         story.append(Paragraph(
             f"<b>{alarms} equipment are classified as ALARM.</b> "
-            "The table below ranks the alarm equipment by the duration beyond the "
-            "applicable PPHG alarm delay (Exceeded By). This makes the units with "
-            "the most prolonged excursions easier to identify and prioritize.",
+            "Units exceeding 24 hours continuous excursion are prioritized as "
+            "<b>REVIEW URGENTLY – &gt;24h</b>.",
             body
         ))
-
-        # Management-friendly ranking table instead of long repetitive bullets.
-        priority_data = [[
-            "Priority", "Equipment", "Cat.", "Longest Continuous",
-            "Exceeded By", "Peak °C", "Assessment"
-        ]]
-        for rank, (_, r) in enumerate(alarm_df.head(10).iterrows(), start=1):
-            priority_data.append([
-                str(rank),
-                Paragraph(str(r["Equipment"]), small),
-                str(r["Category"]),
-                format_duration(r["Longest Continuous"]),
-                format_duration(r["Exceeded By"]),
+        priority = [["Priority","Equipment","Cat.","Continuous","Exceeded","Peak °C","Assessment"]]
+        for rank, (_, r) in enumerate(alarm_df.head(10).iterrows(),1):
+            priority.append([
+                str(rank),Paragraph(str(r["Equipment"]),small),str(r["Category"]),
+                format_duration(r["Longest Continuous"]),format_duration(r["Exceeded By"]),
                 f"{r['Peak During Excursion °C']:.1f}",
-                Paragraph(
-                    "<b>REVIEW URGENTLY – &gt;24h</b>"
-                    if r["Longest Continuous"] > pd.Timedelta(hours=24)
-                    else "REVIEW",
-                    small
-                ),
+                Paragraph("<b>REVIEW URGENTLY – &gt;24h</b>" if
+                          r["Longest Continuous"]>pd.Timedelta(hours=24) else "REVIEW",small)
             ])
-
-        pt = Table(
-            priority_data,
-            colWidths=[13*mm, 63*mm, 18*mm, 31*mm, 28*mm, 20*mm, 30*mm],
-            repeatRows=1,
-        )
+        pt = Table(priority,colWidths=[13*mm,63*mm,18*mm,31*mm,28*mm,20*mm,30*mm],repeatRows=1)
         pt.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
-            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE", (0,0), (-1,0), 7),
-            ("FONTSIZE", (0,1), (-1,-1), 6.8),
-            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C5CCD3")),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-            ("ALIGN", (0,1), (0,-1), "CENTER"),
-            ("ALIGN", (2,1), (5,-1), "CENTER"),
-            ("TOPPADDING", (0,0), (-1,-1), 4),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,1),(0,-1),"CENTER"),
+            ("ALIGN",(2,1),(5,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),4),
+            ("BOTTOMPADDING",(0,0),(-1,-1),4),
         ]))
-        for i, (_, r) in enumerate(alarm_df.head(10).iterrows(), start=1):
-            if r["Longest Continuous"] > pd.Timedelta(hours=24):
-                pt.setStyle(TableStyle([
-                    ("BACKGROUND", (0,i), (-1,i), colors.HexColor("#FFE5E5")),
-                    ("FONTNAME", (0,i), (0,i), "Helvetica-Bold"),
-                ]))
+        for i, (_, r) in enumerate(alarm_df.head(10).iterrows(),1):
+            if r["Longest Continuous"]>pd.Timedelta(hours=24):
+                pt.setStyle(TableStyle([("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFE5E5"))]))
         story.append(pt)
-        story.append(Spacer(1, 3*mm))
-
+        story.append(Spacer(1,3*mm))
         story.append(Paragraph(
-            "<b>How to read the ranking:</b> <i>Exceeded By</i> shows how far the "
-            "longest continuous excursion went beyond the PPHG alarm delay. "
-            "<b>REVIEW URGENTLY – &gt;24h</b> is assigned when the longest continuous "
-            "excursion exceeds 24 hours, indicating a prolonged unit problem requiring "
-            "priority operational review. Other ALARM units are marked <b>REVIEW</b>. "
-            "<i>Peak °C</i> shows the highest temperature reached during that excursion.",
+            "<b>Recommended actions:</b> These are operational review prompts, not "
+            "root-cause diagnoses. Use maintenance history and site records to confirm cause.",
             note
         ))
-
-        story.append(Paragraph("Recommended review focus", h1))
-        story.append(Paragraph(
-            "For the ALARM equipment above, review the applicable operational causes "
-            "such as door opening frequency, loading/unloading, ambient exposure, "
-            "condenser/coil condition, airflow, and equipment performance. "
-            "The ranking is intended to help prioritize the review; it does not "
-            "identify the root cause by itself.",
-            body
-        ))
+        for _, r in alarm_df.head(10).iterrows():
+            story.append(Paragraph(
+                f"<b>{r['Equipment']}</b> — {recommendation_for_row(r)}",
+                body
+            ))
 
     if warnings:
-        story.append(Paragraph("WARNING Equipment", h1))
-        warning_df = result[result["Status"] == "WARNING"].copy()
-        warning_df["excess_min"] = warning_df["Exceeded By"].dt.total_seconds()/60
-        warning_df = warning_df.sort_values(
-            "Longest Continuous", ascending=False
+        story.append(Paragraph("WARNING Equipment — Monitor & Follow Up", h1))
+        wdf = result[result["Status"]=="WARNING"].sort_values(
+            ["Longest Continuous","Excursion Count"],ascending=[False,False]
         )
-
-        warning_data = [["Equipment", "Category", "Longest Continuous", "Peak °C"]]
-        for _, r in warning_df.iterrows():
-            warning_data.append([
-                Paragraph(str(r["Equipment"]), small),
-                str(r["Category"]),
-                format_duration(r["Longest Continuous"]),
-                f"{r['Peak During Excursion °C']:.1f}",
-            ])
-        wt = Table(
-            warning_data,
-            colWidths=[78*mm, 25*mm, 40*mm, 25*mm],
-            repeatRows=1,
-        )
+        wd = [["Equipment","Category","Continuous","Excursions","Peak °C"]]
+        for _, r in wdf.iterrows():
+            wd.append([Paragraph(str(r["Equipment"]),small),str(r["Category"]),
+                       format_duration(r["Longest Continuous"]),str(int(r["Excursion Count"])),
+                       f"{r['Peak During Excursion °C']:.1f}"])
+        wt = Table(wd,colWidths=[78*mm,25*mm,35*mm,30*mm,25*mm],repeatRows=1)
         wt.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#FFF0CC")),
-            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#6B4A00")),
-            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C5CCD3")),
-            ("FONTSIZE", (0,0), (-1,-1), 7),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-            ("ALIGN", (1,1), (-1,-1), "CENTER"),
-            ("TOPPADDING", (0,0), (-1,-1), 4),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF0CC")),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#6B4A00")),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("ALIGN",(1,1),(-1,-1),"CENTER"),
         ]))
         story.append(wt)
-        story.append(Spacer(1, 2*mm))
         story.append(Paragraph(
-            "WARNING equipment experienced a temperature excursion but did not "
-            "reach the PPHG alarm-duration criterion. These units should be watched "
-            "for recurrence, particularly where the longest continuous duration "
-            "approaches the applicable alarm delay.",
+            "WARNING equipment should be monitored for recurrence, especially where "
+            "multiple excursions are detected or duration approaches the alarm delay.",
             note
         ))
 
-    if other:
-        story.append(Paragraph("Other / Not Yet Classified", h1))
+    # 5 Data Quality & recurrence
+    story.append(PageBreak())
+    story.append(Paragraph("5. Data Quality & Recurrence Analysis", h1))
+    if quality:
+        qd = [
+            ["Check","Result","Interpretation"],
+            ["CSV rows",str(quality["rows"]),"Source rows read from Testo CSV."],
+            ["Measurement columns",str(quality["measurement_columns"]),"Temperature series analyzed."],
+            ["Valid timestamps",str(quality["valid_timestamps"]),"Successfully parsed timestamps."],
+            ["Missing timestamps",str(quality["missing_timestamps"]),"Rows without usable timestamps."],
+            ["Missing/non-numeric temperatures",str(quality["missing_temperature_values"]),"Values not usable as temperature readings."],
+            ["Duplicate timestamps",str(quality["duplicate_timestamp_rows"]),"Duplicate timestamps within equipment series."],
+            ["Irregular sampling gaps",str(quality["irregular_intervals"]),"Gaps > 1.5× detected median interval."],
+            ["Other / unmapped equipment",str(quality["other_equipment"]),"Requires category mapping."],
+        ]
+        qt=Table(qd,colWidths=[65*mm,35*mm,130*mm],repeatRows=1)
+        qt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("FONTSIZE",(0,0),(-1,-1),7.5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ]))
+        story.append(qt)
+
+    story.append(Paragraph("Repeated Excursions & Recovery Interval", h1))
+    repeat = result[result["Excursion Count"] >= 2].sort_values(
+        ["Excursion Count","Longest Continuous"],ascending=[False,False]
+    )
+    if repeat.empty:
         story.append(Paragraph(
-            f"<b>{other} measurement point(s)</b> are currently classified as "
-            "<b>Other</b> and are therefore excluded from PPHG Chiller/Freezer "
-            "alarm classification. Once Testo naming is made unique, map each "
-            "point to the correct category before using the result for formal "
-            "compliance assessment.",
+            "No equipment recorded multiple distinct threshold excursions during the analyzed period.",
             body
         ))
+    else:
+        rd=[["Equipment","Excursions","Avg Excursion","Avg Recovery Interval"]]
+        for _,r in repeat.iterrows():
+            rd.append([Paragraph(str(r["Equipment"]),small),str(int(r["Excursion Count"])),
+                       format_duration(r["Avg Excursion"]),
+                       format_duration(r["Avg Recovery Interval"]) if pd.notna(r["Avg Recovery Interval"]) else "—"])
+        rt=Table(rd,colWidths=[90*mm,25*mm,40*mm,45*mm],repeatRows=1)
+        rt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EEF5FA")),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("FONTSIZE",(0,0),(-1,-1),7),("ALIGN",(1,1),(-1,-1),"CENTER"),
+        ]))
+        story.append(rt)
+        story.append(Paragraph(
+            "<b>Recovery interval</b> is the elapsed time between the end of one "
+            "detected threshold excursion and the start of the next. It is a recurrence "
+            "indicator, not a direct compressor/refrigeration recovery measurement.",
+            note
+        ))
 
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1,4*mm))
     story.append(Paragraph(
-        "<b>Report note:</b> This report is an analytical screening based on the "
-        "uploaded Testo measurement data and the PPHG SOP thresholds configured "
-        "in the application. It should be reviewed together with operational "
-        "records and any applicable SOP requirements before formal corrective "
-        "action or compliance conclusions.",
+        "<b>Report note:</b> This report is an analytical screening based on uploaded "
+        "Testo data and configured PPHG thresholds. Review with operational records, "
+        "maintenance history and applicable SOP requirements before formal corrective action.",
         note
     ))
 
@@ -551,12 +688,14 @@ def build_pdf_report(result, data, median_interval):
     return buffer.getvalue()
 
 
+
 uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 
 if uploaded:
     try:
         data, raw = parse_testo(uploaded)
         result, median_interval = analyze(data)
+        quality = data_quality_report(raw, data, result, median_interval)
 
         equipment_count = result["Equipment"].nunique()
         st.success(
@@ -657,6 +796,34 @@ if uploaded:
                 config={"displayModeBar": False},
             )
 
+        # Phase 1 enhancements: repeated excursions, recovery interval and data quality.
+        repeated_df = result[result["Excursion Count"] >= 2].copy()
+        st.markdown("**Additional Analysis**")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Repeated Excursion Units", len(repeated_df))
+        a2.metric("Total Excursions", int(result["Excursion Count"].sum()))
+        a3.metric("Irregular Sampling Gaps", quality["irregular_intervals"])
+
+        if not repeated_df.empty:
+            top_repeat = repeated_df.sort_values(
+                ["Excursion Count", "Longest Continuous"],
+                ascending=[False, False]
+            ).iloc[0]
+            st.info(
+                f"**Repeated excursions:** {top_repeat['Equipment']} recorded "
+                f"**{int(top_repeat['Excursion Count'])} distinct excursions**. "
+                f"Average excursion: **{format_duration(top_repeat['Avg Excursion'])}**. "
+                f"Average interval between excursions: **"
+                f"{format_duration(top_repeat['Avg Recovery Interval']) if pd.notna(top_repeat['Avg Recovery Interval']) else '—'}**."
+            )
+
+        st.markdown("**Data Quality**")
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Valid timestamps", quality["valid_timestamps"])
+        q2.metric("Missing timestamps", quality["missing_timestamps"])
+        q3.metric("Duplicate timestamps", quality["duplicate_timestamp_rows"])
+        q4.metric("Other / Unmapped", quality["other_equipment"])
+
         # Management-oriented findings: concise, data-derived and actionable.
         st.markdown("**Key Findings**")
         findings = []
@@ -712,7 +879,7 @@ if uploaded:
 
         # Keep the analysis filters here. They do not affect the Executive Summary;
         # they only control which rows are shown in the detailed analysis table.
-        f1, f2, f3 = st.columns(3)
+        f1, f2 = st.columns(2)
         category_options = ["All"] + sorted(
             result["Category"].dropna().unique().tolist()
         )
@@ -729,15 +896,6 @@ if uploaded:
             key="analysis_status_filter",
         )
 
-        equipment_options = ["All"] + sorted(
-            result["Equipment"].dropna().unique().tolist()
-        )
-        selected_equipment = f3.selectbox(
-            "Filter by equipment",
-            equipment_options,
-            key="analysis_equipment_filter",
-        )
-
         filtered_result = result.copy()
         if selected_category != "All":
             filtered_result = filtered_result[
@@ -752,10 +910,6 @@ if uploaded:
                 filtered_result = filtered_result[
                     filtered_result["Status"] == selected_status
                 ]
-        if selected_equipment != "All":
-            filtered_result = filtered_result[
-                filtered_result["Equipment"] == selected_equipment
-            ]
 
         st.caption(
             f"Showing **{len(filtered_result)} of {len(result)} equipment**."
@@ -790,7 +944,7 @@ if uploaded:
         table_cols = [
             "Equipment", "Category", "Min °C", "Average °C", "Max °C",
             "Longest Start", "Longest End",
-            "Longest Continuous", "Exceeded By", "Status"
+            "Longest Continuous", "Exceeded By", "Excursion Count", "Status"
         ]
 
         def status_style(row):
@@ -855,7 +1009,7 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-        pdf_bytes = build_pdf_report(result, data, median_interval)
+        pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
         st.download_button(
             "📄 Download PPHG PDF Report",
             pdf_bytes,
