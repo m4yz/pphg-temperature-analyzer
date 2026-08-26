@@ -93,7 +93,15 @@ def longest_continuous(g, category, median_interval):
         return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
 
     duration, start, end, peak = best
-    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    # A true single-point excursion has no elapsed time between its first
+    # and last sample. Do NOT use len(r) here: r is only the last group
+    # visited by the loop and can misclassify longer excursions.
+    if duration <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif duration >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
     return duration, start, end, peak, status
 
 def parse_testo(uploaded):
@@ -194,12 +202,19 @@ def analyze(df):
         })
 
     out = pd.DataFrame(rows)
-    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "SINGLE POINT": 3, "N/A": 4}
     out["_order"] = out["Status"].map(order).fillna(9)
+
+    # Report priority:
+    # ALARM -> largest Exceeded By first
+    # WARNING/NORMAL -> longest continuous excursion first
+    # N/A -> last
+    out["_priority_exceeded"] = out["Exceeded By"].fillna(pd.Timedelta(0))
+    out["_priority_continuous"] = out["Longest Continuous"].fillna(pd.Timedelta(0))
     out = out.sort_values(
-        ["_order", "Longest Continuous"],
-        ascending=[True, False]
-    ).drop(columns="_order")
+        ["_order", "_priority_exceeded", "_priority_continuous"],
+        ascending=[True, False, False]
+    ).drop(columns=["_order", "_priority_exceeded", "_priority_continuous"])
     return out, median_interval
 
 
@@ -248,6 +263,7 @@ def build_pdf_report(result, data, median_interval):
     alarms = int((result["Status"] == "ALARM").sum())
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
+    single_point = int((result["Status"] == "SINGLE POINT").sum())
     other = int((result["Category"] == "Other").sum())
 
     story.append(Paragraph("PPHG Temperature Analysis Report", title))
@@ -261,10 +277,10 @@ def build_pdf_report(result, data, median_interval):
     # Executive summary
     story.append(Paragraph("1. Executive Summary", h1))
     summary_data = [
-        ["Equipment", "Alarm", "Warning", "Normal", "Other / N/A"],
-        [str(total), str(alarms), str(warnings), str(normal), str(other)],
+        ["Equipment", "Alarm", "Warning", "Normal", "Single Point", "Other / N/A"],
+        [str(total), str(alarms), str(warnings), str(normal), str(single_point), str(other)],
     ]
-    t = Table(summary_data, colWidths=[35*mm]*5)
+    t = Table(summary_data, colWidths=[29*mm]*6)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
@@ -399,6 +415,10 @@ def build_pdf_report(result, data, median_interval):
             style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#FFF0CC")))
         elif r["Status"] == "NORMAL":
             style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#D9F5E5")))
+        elif r["Status"] == "SINGLE POINT":
+            style_cmds.append(("BACKGROUND", (-1,i), (-1,i), colors.HexColor("#FFF7D6")))
+            style_cmds.append(("TEXTCOLOR", (-1,i), (-1,i), colors.HexColor("#7A5A00")))
+            style_cmds.append(("FONTNAME", (-1,i), (-1,i), "Helvetica-Bold"))
     at.setStyle(TableStyle(style_cmds))
     story.append(at)
 
@@ -522,6 +542,38 @@ def build_pdf_report(result, data, median_interval):
             note
         ))
 
+    if single_point:
+        story.append(Paragraph("Single-Point Excursions", h1))
+        story.append(Paragraph(
+            "A threshold excursion was detected, but only one measurement point was "
+            "available for the excursion. A continuous PPHG excursion cannot be "
+            "established from a single point, so these points are not classified as "
+            "WARNING or ALARM.",
+            body
+        ))
+        sp_df = result[result["Status"] == "SINGLE POINT"].copy()
+        sp_data = [["Equipment", "Category", "Observed °C", "Timestamp"]]
+        for _, r in sp_df.iterrows():
+            ts = r["Longest Start"].strftime("%d-%m-%Y %H:%M") if pd.notna(r["Longest Start"]) else "—"
+            sp_data.append([
+                Paragraph(str(r["Equipment"]), small),
+                str(r["Category"]),
+                f"{r['Peak During Excursion °C']:.1f}",
+                ts,
+            ])
+        sp_t = Table(sp_data, colWidths=[80*mm, 28*mm, 28*mm, 48*mm], repeatRows=1)
+        sp_t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#FFF7D6")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#7A5A00")),
+            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C5CCD3")),
+            ("FONTSIZE", (0,0), (-1,-1), 7),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(sp_t)
+
     if other:
         story.append(Paragraph("Other / Not Yet Classified", h1))
         story.append(Paragraph(
@@ -572,12 +624,14 @@ if uploaded:
         alarms = int((result["Status"] == "ALARM").sum())
         warnings = int((result["Status"] == "WARNING").sum())
         normal = int((result["Status"] == "NORMAL").sum())
+        single_point = int((result["Status"] == "SINGLE POINT").sum())
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Equipment", equipment_count)
         c2.metric("🔴 Alarm", alarms)
         c3.metric("🟠 Warning", warnings)
         c4.metric("🟢 Normal", normal)
+        c5.metric("🟡 Single Point", single_point)
 
         st.divider()
         st.subheader("PPHG Analysis")
@@ -585,7 +639,7 @@ if uploaded:
         # Filters for the analysis table
         f1, f2 = st.columns(2)
         category_options = ["All"] + sorted(result["Category"].dropna().unique().tolist())
-        status_options = ["All"] + ["ALARM", "WARNING", "NORMAL", "N/A"]
+        status_options = ["All"] + ["ALARM", "WARNING", "NORMAL", "SINGLE POINT", "N/A"]
 
         selected_category = f1.selectbox(
             "Filter by category",
@@ -616,6 +670,8 @@ if uploaded:
 
             **Longest Continuous** = longest continuous excursion above the applicable
             temperature limit. **Exceeded By** = time beyond the applicable PPHG alarm delay.
+            **Single Point** = threshold reached at one measurement point, without enough
+            consecutive data to establish a continuous excursion.
             """,
             unsafe_allow_html=False,
         )
@@ -653,6 +709,8 @@ if uploaded:
                 styles[i] = "background-color:#fff0cc;color:#9a5b00;font-weight:700"
             elif row["Status"] == "NORMAL":
                 styles[i] = "background-color:#d9f5e5;color:#087443;font-weight:700"
+            elif row["Status"] == "SINGLE POINT":
+                styles[i] = "background-color:#fff7d6;color:#7a5a00;font-weight:700"
             return styles
 
         st.dataframe(
@@ -702,17 +760,7 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-for col in ["Longest Continuous", "Exceeded By"]:
-            export[col] = export[col].map(
-                lambda x: format_duration(x) if pd.notna(x) else "—"
-            )
-        export["Longest Start"] = pd.to_datetime(
-            export["Longest Start"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d %H:%M")
-        export["Longest End"] = pd.to_datetime(
-            export["Longest End"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d %H:%M")
-pdf_bytes = build_pdf_report(result, data, median_interval)
+        pdf_bytes = build_pdf_report(result, data, median_interval)
         st.download_button(
             "📄 Download PPHG PDF Report",
             pdf_bytes,
