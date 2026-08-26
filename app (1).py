@@ -78,7 +78,7 @@ def longest_continuous(g, category, median_interval):
     g = g.sort_values("Timestamp").copy()
     g["above"] = g["Temperature"] >= rule["limit"]
 
-    # A missing/gapped sample must not be treated as continuous excursion.
+    # A missing/gapped sample must not be treated as continuous threshold event.
     max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
     g["gap"] = g["Timestamp"].diff() > max_gap
     g["group"] = (g["gap"] | ~g["above"]).cumsum()
@@ -103,19 +103,28 @@ def longest_continuous(g, category, median_interval):
 
 
 def excursion_stats(g, category, median_interval):
-    """Calculate continuous excursions, recurrence count and recovery intervals."""
+    """Calculate distinct threshold events and the longest continuous event.
+
+    A threshold event is one distinct period in which the measured temperature is
+    at or above the applicable PPHG limit. This is a data-derived recurrence
+    indicator only; it is NOT a count of equipment failures or root-cause events.
+    """
     if category not in RULES:
         return {
             "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
-            "peak": pd.NaT, "status": "N/A", "excursion_count": 0,
-            "avg_excursion": pd.Timedelta(0), "avg_recovery": pd.NaT,
+            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
         }
 
     rule = RULES[category]
     g = g.sort_values("Timestamp").copy()
     g["above"] = g["Temperature"] >= rule["limit"]
 
-    max_gap = median_interval * 1.5 if median_interval > pd.Timedelta(0) else pd.Timedelta(minutes=10)
+    # A sampling gap must not be treated as continuous time above threshold.
+    max_gap = (
+        median_interval * 1.5
+        if median_interval > pd.Timedelta(0)
+        else pd.Timedelta(minutes=10)
+    )
     g["gap"] = g["Timestamp"].diff() > max_gap
     g["group"] = (g["gap"] | ~g["above"]).cumsum()
 
@@ -133,20 +142,10 @@ def excursion_stats(g, category, median_interval):
     if not runs:
         return {
             "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
-            "peak": pd.NaT, "status": "NORMAL", "excursion_count": 0,
-            "avg_excursion": pd.Timedelta(0), "avg_recovery": pd.NaT,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
         }
 
     best = max(runs, key=lambda x: x["duration"])
-    recovery = [
-        nxt["start"] - prev["end"]
-        for prev, nxt in zip(runs, runs[1:])
-        if nxt["start"] - prev["end"] > pd.Timedelta(0)
-    ]
-    avg_recovery = (
-        pd.Series(recovery, dtype="timedelta64[ns]").mean()
-        if recovery else pd.NaT
-    )
 
     if best["duration"] <= pd.Timedelta(0):
         status = "SINGLE POINT"
@@ -161,35 +160,8 @@ def excursion_stats(g, category, median_interval):
         "end": best["end"],
         "peak": best["peak"],
         "status": status,
-        "excursion_count": len(runs),
-        "avg_excursion": pd.Series(
-            [r["duration"] for r in runs], dtype="timedelta64[ns]"
-        ).mean(),
-        "avg_recovery": avg_recovery,
+        "threshold_events": len(runs),
     }
-
-
-def recommendation_for_row(row):
-    category = row["Category"]
-    peak = row["Peak During Excursion °C"]
-    duration = row["Longest Continuous"]
-    repeated = int(row.get("Excursion Count", 0))
-
-    if category == "Freezer":
-        if pd.notna(peak) and peak >= 0:
-            text = "Check refrigeration performance, door/door-seal condition, defrost cycle, loading and product obstruction."
-        else:
-            text = "Review door opening/loading, refrigeration performance, condenser/coil condition and defrost operation."
-    elif category == "Chiller":
-        text = "Review door opening/loading, ambient exposure, condenser/coil condition, airflow and temperature-control performance."
-    else:
-        text = "Map the measurement point to the correct equipment category."
-
-    if repeated >= 3:
-        text += " Repeated excursions also warrant review of operating practices and recurrence pattern."
-    if duration > pd.Timedelta(hours=24):
-        text += " Prioritize this unit for urgent operational review due to the prolonged excursion."
-    return text
 
 
 def parse_testo(uploaded):
@@ -279,9 +251,7 @@ def analyze(df):
             "Exceeded By": exceeded,
             "Status": stats["status"],
             "Peak During Excursion °C": stats["peak"],
-            "Excursion Count": stats["excursion_count"],
-            "Avg Excursion": stats["avg_excursion"],
-            "Avg Recovery Interval": stats["avg_recovery"],
+            "Threshold Events": stats["threshold_events"],
         })
 
     out = pd.DataFrame(rows)
@@ -368,18 +338,6 @@ def _report_footer(canvas, doc):
     canvas.restoreState()
 
 
-def _action_short(row):
-    if row["Category"] == "Freezer":
-        action = "Refrigeration performance; door/seal; defrost; loading; condenser/coil."
-    elif row["Category"] == "Chiller":
-        action = "Door/loading; ambient exposure; condenser/coil; airflow; temperature control."
-    else:
-        action = "Confirm equipment mapping before operational assessment."
-    if int(row.get("Excursion Count", 0)) >= 3:
-        action += " Review recurrence pattern."
-    return action
-
-
 def pdf_status_chart(result):
     counts = [
         int((result["Status"] == "ALARM").sum()),
@@ -455,7 +413,7 @@ def pdf_top5_chart(alarm_df):
                      fontName="Helvetica-Bold", fontSize=7,
                      fillColor=colors.HexColor("#263746")))
     d.add(Line(left, 8, right, 8, strokeColor=colors.HexColor("#B9C2CC"), strokeWidth=0.6))
-    d.add(String(left, 0, "Longest Continuous excursion (hours)",
+    d.add(String(left, 0, "Longest Continuous threshold event (hours)",
                  fontName="Helvetica", fontSize=6.8,
                  fillColor=colors.HexColor("#667481")))
     return d
@@ -524,11 +482,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ["Exceeded By", "Longest Continuous"], ascending=[False, False]
     ).copy()
     warning_df = result[result["Status"] == "WARNING"].sort_values(
-        ["Longest Continuous", "Excursion Count"], ascending=[False, False]
+        ["Longest Continuous", "Threshold Events"], ascending=[False, False]
     ).copy()
     single_df = result[result["Status"] == "SINGLE POINT"].copy()
-    repeat = result[result["Excursion Count"] >= 2].sort_values(
-        ["Excursion Count", "Longest Continuous"], ascending=[False, False]
+    repeat = result[result["Threshold Events"] >= 2].sort_values(
+        ["Threshold Events", "Longest Continuous"], ascending=[False, False]
     )
 
     story = []
@@ -601,8 +559,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
 
     story.append(Paragraph("PPHG Criteria Used", h2))
     criteria = [
-        ["Chiller", "≥ 6°C", "2 hours", "Continuous excursion ≥2h → ALARM"],
-        ["Freezer", "≥ -15°C", "4 hours", "Continuous excursion ≥4h → ALARM"],
+        ["Chiller", "≥ 6°C", "2 hours", "Continuous threshold event ≥2h → ALARM"],
+        ["Freezer", "≥ -15°C", "4 hours", "Continuous threshold event ≥4h → ALARM"],
     ]
     ct = Table(criteria, colWidths=[32*mm,32*mm,32*mm,124*mm])
     ct.setStyle(TableStyle([
@@ -616,7 +574,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ]))
     story.append(ct)
     story.append(Paragraph(
-        "Longest Continuous uses consecutive samples above the applicable threshold; sampling gaps are not treated as continuous. "
+        "Longest Continuous uses consecutive samples at or above the applicable threshold; sampling gaps are not treated as continuous. "
         "Exceeded By is the portion beyond the applicable PPHG delay.",
         note
     ))
@@ -625,20 +583,20 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(PageBreak())
     story.append(Paragraph("2. Equipment Analysis", title))
     story.append(Paragraph(
-        f"<b>{len(result)} equipment</b> • Sorted by status and longest continuous excursion. "
+        f"<b>{len(result)} equipment</b> • Sorted by status and longest continuous threshold event. "
         "Status colors are applied only to the final column for quick scanning.",
         note
     ))
     story.append(Paragraph(
-        "<b>Reading guide:</b> Continuous = longest threshold excursion. "
+        "<b>Reading guide:</b> Continuous = longest threshold event. "
         "Exceeded = time beyond the applicable PPHG delay. "
-        "Excursions = number of distinct threshold excursions detected for that equipment.",
+        "Threshold Events = number of distinct periods detected at or above the applicable PPHG threshold. This is a recurrence indicator, not a failure count.",
         note
     ))
     story.append(Spacer(1,1.5*mm))
 
     headers = ["Equipment","Cat.","Min °C","Avg °C","Max °C","Start","End",
-               "Continuous","Exceeded","Excursions","Status"]
+               "Continuous","Exceeded","Threshold Events","Status"]
     rows = [headers]
     for _, r in result.iterrows():
         start = r["Longest Start"].strftime("%d-%m %H:%M") if pd.notna(r["Longest Start"]) else "—"
@@ -648,7 +606,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
             f"{r['Min °C']:.1f}", f"{r['Average °C']:.1f}", f"{r['Max °C']:.1f}",
             start, end, format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
-            str(int(r["Excursion Count"])),
+            str(int(r["Threshold Events"])),
             "N/A" if r["Category"]=="Other" else str(r["Status"])
         ])
     at = Table(rows, colWidths=[51*mm,18*mm,13*mm,13*mm,13*mm,24*mm,24*mm,
@@ -682,17 +640,17 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("3. Alarm Analysis & Priority Review", title))
     story.append(Paragraph(
         f"<b>{alarms} ALARM equipment</b> identified. "
-        f"<b>{urgent}</b> have continuous excursions &gt;24h and are classified <b>REVIEW URGENTLY</b>.",
+        f"<b>{urgent}</b> have continuous threshold events &gt;24h and are classified <b>REVIEW URGENTLY</b>.",
         callout
     ))
-    priority = [["Rank","Equipment","Category","Continuous","Exceeded By","Peak °C","Excursions"]]
+    priority = [["Rank","Equipment","Category","Continuous","Exceeded By","Peak °C","Threshold Events"]]
     for rank, (_, r) in enumerate(alarm_df.iterrows(), 1):
         priority.append([
             str(rank), Paragraph(str(r["Equipment"]), small), str(r["Category"]),
             format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]),
             f"{r['Peak During Excursion °C']:.1f}°C",
-            str(int(r["Excursion Count"]))
+            str(int(r["Threshold Events"]))
         ])
     pt2 = Table(priority, colWidths=[13*mm,82*mm,24*mm,34*mm,34*mm,25*mm,25*mm], repeatRows=1)
     st2 = [
@@ -711,14 +669,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Spacer(1,3*mm))
     story.append(Spacer(1,3*mm))
     story.append(Paragraph(
-        "<b>Priority interpretation:</b> An ALARM unit with a continuous excursion exceeding 24 hours may indicate a sustained equipment performance issue "
+        "<b>Priority interpretation:</b> An ALARM unit with a continuous threshold event exceeding 24 hours may indicate a sustained equipment performance issue "
         "and should receive priority operational review. This is an analytical flag, not a root-cause diagnosis.",
         note
     ))
     story.append(Paragraph(
         "<b>General review notes:</b> For chillers, review door/loading practices, ambient exposure, condenser/coil condition, airflow and temperature control. "
         "For freezers, review refrigeration performance, door/seal condition, defrost operation, loading and condenser/coil condition. "
-        "Repeated excursions also indicate a recurrence pattern that may warrant operational review.",
+        "Repeated threshold events also indicate a recurrence pattern that may warrant operational review.",
         note
     ))
 
@@ -727,11 +685,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("4. Warning & Single-Point Review", title))
     if warnings:
         story.append(Paragraph("WARNING — Monitor & Follow Up", h2))
-        wd = [["Equipment","Category","Continuous","Excursions","Peak °C"]]
+        wd = [["Equipment","Category","Continuous","Threshold Events","Peak °C"]]
         for _, r in warning_df.iterrows():
             wd.append([
                 Paragraph(str(r["Equipment"]), small), str(r["Category"]),
-                format_duration(r["Longest Continuous"]), str(int(r["Excursion Count"])),
+                format_duration(r["Longest Continuous"]), str(int(r["Threshold Events"])),
                 f"{r['Peak During Excursion °C']:.1f}"
             ])
         wt = Table(wd, colWidths=[92*mm,30*mm,36*mm,30*mm,28*mm], repeatRows=1)
@@ -747,7 +705,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         story.append(wt)
         story.append(Paragraph(
             "<b>Warning interpretation:</b> These units exceeded the applicable temperature threshold but did not reach the PPHG alarm duration. "
-            "They should be monitored for recurrence, especially when excursion duration approaches the alarm delay.",
+            "They should be monitored for recurrence, especially when event duration approaches the alarm delay.",
             note
         ))
         story.append(Paragraph(
@@ -758,9 +716,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
 
     if not single_df.empty:
         story.append(Spacer(1,3*mm))
-        story.append(Paragraph("Single-Point Excursions", h2))
+        story.append(Paragraph("Single-Point Threshold Events", h2))
         story.append(Paragraph(
-            "A threshold excursion was observed, but no elapsed duration can be established from the available point(s). "
+            "A threshold event was observed, but no elapsed duration can be established from the available point(s). "
             "These are not classified as WARNING or ALARM.",
             note
         ))
@@ -779,45 +737,54 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ]))
         story.append(stp)
 
-    # PAGE 5 — Recurrence
+    # PAGE 5 — Threshold Recurrence
     story.append(PageBreak())
-    story.append(Paragraph("5. Repeated Excursions & Recovery Interval", title))
+    story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
-        f"<b>{len(repeat)}</b> equipment recorded multiple distinct threshold excursions. "
-        "This section highlights recurrence frequency rather than alarm severity.",
+        f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
+        "This section highlights recurrence frequency, not equipment-failure count or root cause.",
         note
     ))
     if repeat.empty:
-        story.append(Paragraph("No repeated threshold excursions were detected.", body))
+        story.append(Paragraph("No repeated threshold events were detected.", body))
     else:
-        rd = [["Equipment","Category","Excursions","Avg Excursion","Avg Recovery Interval"]]
+        rd = [["Equipment", "Category", "Threshold Events", "Longest Event", "Status"]]
         for _, r in repeat.iterrows():
             rd.append([
-                Paragraph(str(r["Equipment"]), tiny), str(r["Category"]),
-                str(int(r["Excursion Count"])), format_duration(r["Avg Excursion"]),
-                format_duration(r["Avg Recovery Interval"]) if pd.notna(r["Avg Recovery Interval"]) else "—"
+                Paragraph(str(r["Equipment"]), tiny),
+                str(r["Category"]),
+                str(int(r["Threshold Events"])),
+                format_duration(r["Longest Continuous"]),
+                "URGENT >24h" if r["Longest Continuous"] > pd.Timedelta(hours=24)
+                else str(r["Status"])
             ])
-        rt = Table(rd, colWidths=[92*mm,25*mm,25*mm,38*mm,50*mm], repeatRows=1)
+        rt = Table(rd, colWidths=[88*mm,25*mm,34*mm,42*mm,40*mm], repeatRows=1)
         rt.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EAF2F8")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#17324D")),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
             ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("FONTSIZE",(0,0),(-1,-1),7),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("ALIGN",(1,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),3.5),("BOTTOMPADDING",(0,0),(-1,-1),3.5),
+            ("TOPPADDING",(0,0),(-1,-1),3.5),
+            ("BOTTOMPADDING",(0,0),(-1,-1),3.5),
         ]))
         for i, (_, r) in enumerate(repeat.iterrows(),1):
-            if int(r["Excursion Count"]) >= 50:
-                rt.setStyle(TableStyle([("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF5F5"))]))
+            if r["Longest Continuous"] > pd.Timedelta(hours=24):
+                rt.setStyle(TableStyle([
+                    ("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0"))
+                ]))
         story.append(rt)
         story.append(Spacer(1,3*mm))
         story.append(Paragraph(
-            "<b>Recovery interval</b> is the elapsed time between the end of one detected threshold excursion and the start of the next. "
-            "It is a recurrence indicator, not a direct compressor/refrigeration recovery measurement.",
+            "<b>How to read this:</b> A threshold event is one distinct period where the measured temperature is at or above the applicable PPHG threshold. "
+            "A high event count indicates frequent threshold crossing; it does <b>not</b> mean the equipment failed that many times. "
+            "Event count should be interpreted together with Longest Continuous, Peak temperature and operating records.",
             note
         ))
-    story.append(Spacer(1,5*mm))
+
+    story.append(Spacer(1,4*mm))
     story.append(Paragraph(
         "<b>Report note:</b> This report is an analytical screening based on uploaded Testo measurement data and the configured PPHG thresholds. "
         "Review findings together with operational records, maintenance history and applicable SOP requirements before formal corrective action or conclusions.",
@@ -861,7 +828,7 @@ if uploaded:
         # ------------------------------------------------------------
         st.subheader("Executive Summary")
         st.caption(
-            "Overview of equipment status based on PPHG temperature excursion analysis."
+            "Overview of equipment status based on PPHG temperature threshold-event analysis."
         )
 
         c1, c2, c3, c4 = st.columns(4)
@@ -936,24 +903,22 @@ if uploaded:
                 config={"displayModeBar": False},
             )
 
-        # Phase 1 enhancements: repeated excursions and recovery interval.
-        repeated_df = result[result["Excursion Count"] >= 2].copy()
-        st.markdown("**Additional Analysis**")
+        # Threshold-event recurrence: useful as a pattern indicator, not a failure count.
+        repeated_df = result[result["Threshold Events"] >= 2].copy()
+        st.markdown("**Threshold Recurrence**")
         a1, a2 = st.columns(2)
-        a1.metric("Repeated Excursion Units", len(repeated_df))
-        a2.metric("Total Excursions", int(result["Excursion Count"].sum()))
+        a1.metric("Units with Repeated Events", len(repeated_df))
+        a2.metric("Total Threshold Events", int(result["Threshold Events"].sum()))
 
         if not repeated_df.empty:
             top_repeat = repeated_df.sort_values(
-                ["Excursion Count", "Longest Continuous"],
+                ["Threshold Events", "Longest Continuous"],
                 ascending=[False, False]
             ).iloc[0]
             st.info(
-                f"**Repeated excursions:** {top_repeat['Equipment']} recorded "
-                f"**{int(top_repeat['Excursion Count'])} distinct excursions**. "
-                f"Average excursion: **{format_duration(top_repeat['Avg Excursion'])}**. "
-                f"Average interval between excursions: **"
-                f"{format_duration(top_repeat['Avg Recovery Interval']) if pd.notna(top_repeat['Avg Recovery Interval']) else '—'}**."
+                f"**Highest event count:** {top_repeat['Equipment']} recorded "
+                f"**{int(top_repeat['Threshold Events'])} distinct threshold events**. "
+                "This indicates frequent threshold crossing and should not be interpreted as a count of equipment failures."
             )
 
         # Management-oriented findings: concise, data-derived and actionable.
@@ -977,20 +942,20 @@ if uploaded:
             )
             if urgent:
                 findings.append(
-                    f"**{urgent} equipment** have a continuous excursion exceeding "
+                    f"**{urgent} equipment** have a continuous threshold event exceeding "
                     f"24 hours and should receive priority operational review."
                 )
 
             top = alarm_df.iloc[0]
             findings.append(
-                f"Longest current excursion: **{top['Equipment']}** — "
+                f"Longest threshold event: **{top['Equipment']}** — "
                 f"{format_duration(top['Longest Continuous'])}, "
                 f"peak **{top['Peak During Excursion °C']:.1f}°C**."
             )
 
         if warnings:
             findings.append(
-                f"**{warnings} equipment** recorded excursions below the PPHG "
+                f"**{warnings} equipment** recorded threshold events below the PPHG "
                 f"alarm-duration threshold and should be monitored for recurrence."
             )
 
@@ -1001,7 +966,7 @@ if uploaded:
             )
 
         if not findings:
-            findings.append("No PPHG Chiller/Freezer alarm-duration excursions were identified.")
+            findings.append("No PPHG Chiller/Freezer alarm-duration threshold events were identified.")
 
         for finding in findings:
             st.markdown(f"• {finding}")
@@ -1053,7 +1018,7 @@ if uploaded:
             **PPHG Alarm Criteria:** 🔴 **Chiller ≥ 6°C for 2 hours** &nbsp;|&nbsp;
             🧊 **Freezer ≥ -15°C for 4 hours**
 
-            **Longest Continuous** = longest continuous excursion above the applicable
+            **Longest Continuous** = longest continuous threshold event at or above the applicable
             temperature limit. **Exceeded By** = time beyond the applicable PPHG alarm delay.
             """,
             unsafe_allow_html=False,
@@ -1076,7 +1041,7 @@ if uploaded:
         table_cols = [
             "Equipment", "Category", "Min °C", "Average °C", "Max °C",
             "Longest Start", "Longest End",
-            "Longest Continuous", "Exceeded By", "Excursion Count", "Status"
+            "Longest Continuous", "Exceeded By", "Threshold Events", "Status"
         ]
 
         def status_style(row):
@@ -1132,12 +1097,12 @@ if uploaded:
         d1, d2, d3 = st.columns(3)
         d1.metric("Longest Continuous", format_duration(selected_result["Longest Continuous"]))
         d2.metric(
-            "Excursion Start",
+            "Longest Event Start",
             selected_result["Longest Start"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest Start"]) else "—"
         )
         d3.metric(
-            "Excursion End",
+            "Longest Event End",
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
