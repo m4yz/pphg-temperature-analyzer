@@ -202,6 +202,12 @@ def analyze(data, typical_interval_minutes):
             g, category, typical_interval_minutes
         )
 
+        exceeded_by = (
+            max(excursion["Longest Continuous"] - rule["delay"], pd.Timedelta(0))
+            if excursion["Status"] == "ALARM"
+            else pd.Timedelta(0)
+        )
+
         rows.append({
             "Equipment": equipment,
             "Category": category,
@@ -212,6 +218,7 @@ def analyze(data, typical_interval_minutes):
                 f"≥{rule['limit']:g}°C / "
                 f"{rule['delay'].total_seconds()/3600:g}h"
             ),
+            "Exceeded By": exceeded_by,
             **excursion,
         })
 
@@ -306,21 +313,43 @@ if uploaded:
             display["Longest End"], errors="coerce"
         ).dt.strftime("%d-%m-%Y %H:%M").fillna("—")
 
+        display["Exceeded By"] = display["Exceeded By"].apply(
+            lambda x: format_duration(x) if x > pd.Timedelta(0) else "—"
+        )
+
+        table_cols = [
+            "Equipment",
+            "Category",
+            "Min °C",
+            "Average °C",
+            "Max °C",
+            "Alarm Limit",
+            "Longest Start",
+            "Longest End",
+            "Longest Continuous",
+            "Exceeded By",
+            "Status",
+        ]
+
+        def color_status(row):
+            styles = [""] * len(row)
+            status_idx = table_cols.index("Status")
+            if row["Status"] == "ALARM":
+                styles[status_idx] = "background-color: #ffd6d6; color: #b00020; font-weight: 700"
+            elif row["Status"] == "WARNING":
+                styles[status_idx] = "background-color: #fff0cc; color: #9a5b00; font-weight: 700"
+            elif row["Status"] == "NORMAL":
+                styles[status_idx] = "background-color: #d9f5e5; color: #087443; font-weight: 700"
+            return styles
+
+        styled_display = (
+            display[table_cols]
+            .style
+            .apply(color_status, axis=1)
+        )
+
         st.dataframe(
-            display[
-                [
-                    "Equipment",
-                    "Category",
-                    "Min °C",
-                    "Average °C",
-                    "Max °C",
-                    "Alarm Limit",
-                    "Longest Start",
-                    "Longest End",
-                    "Longest Continuous",
-                    "Status",
-                ]
-            ],
+            styled_display,
             use_container_width=True,
             hide_index=True,
         )
