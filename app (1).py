@@ -702,17 +702,7 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-for col in ["Longest Continuous", "Exceeded By"]:
-            export[col] = export[col].map(
-                lambda x: format_duration(x) if pd.notna(x) else "—"
-            )
-        export["Longest Start"] = pd.to_datetime(
-            export["Longest Start"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d %H:%M")
-        export["Longest End"] = pd.to_datetime(
-            export["Longest End"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d %H:%M")
-pdf_bytes = build_pdf_report(result, data, median_interval)
+        pdf_bytes = build_pdf_report(result, data, median_interval)
         st.download_button(
             "📄 Download PPHG PDF Report",
             pdf_bytes,
