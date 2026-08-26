@@ -781,6 +781,17 @@ def build_pdf_report(result, data, median_interval, raw=None):
 
 
 
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def generate_pdf_cached(result_json, median_minutes, analysis_start, analysis_end):
+    """Cache generated PDF so repeated downloads do not rebuild the report."""
+    result_df = pd.read_json(result_json, orient="split")
+    median_interval = pd.Timedelta(minutes=float(median_minutes))
+    period_data = pd.DataFrame({
+        "Timestamp": pd.to_datetime([analysis_start, analysis_end])
+    })
+    return build_pdf_report(result_df, period_data, median_interval, raw=None)
+
 uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 
 if uploaded:
@@ -1100,7 +1111,12 @@ if uploaded:
         if st.button("📄 Generate PDF Report", type="primary", width="stretch", key="generate_pphg_pdf"):
             try:
                 with st.spinner("Generating PDF report..."):
-                    pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
+                    pdf_bytes = generate_pdf_cached(
+                        result.to_json(orient="split", date_format="iso"),
+                        float(median_interval.total_seconds() / 60.0),
+                        str(pd.to_datetime(data["Timestamp"]).min()),
+                        str(pd.to_datetime(data["Timestamp"]).max()),
+                    )
                 st.session_state["pphg_pdf_bytes"] = pdf_bytes
                 st.success("PDF report siap di-download.")
             except Exception as pdf_error:
