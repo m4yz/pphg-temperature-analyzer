@@ -191,37 +191,6 @@ def recommendation_for_row(row):
     return text
 
 
-def data_quality_report(raw, data, result, median_interval):
-    timestamp_col = raw.columns[0]
-    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
-    missing_timestamps = int(timestamps.isna().sum())
-    missing_temperature_values = sum(
-        int(pd.to_numeric(raw[c], errors="coerce").isna().sum())
-        for c in raw.columns[1:]
-    )
-
-    duplicate_timestamp_rows = 0
-    irregular_intervals = 0
-    for _, g in data.groupby("Equipment", sort=False):
-        ts = g["Timestamp"].sort_values()
-        duplicate_timestamp_rows += int(ts.duplicated().sum())
-        diffs = ts.diff().dropna()
-        diffs = diffs[diffs > pd.Timedelta(0)]
-        if not diffs.empty:
-            irregular_intervals += int((diffs > median_interval * 1.5).sum())
-
-    return {
-        "rows": len(raw),
-        "measurement_columns": max(len(raw.columns) - 1, 0),
-        "valid_timestamps": int(timestamps.notna().sum()),
-        "missing_timestamps": missing_timestamps,
-        "missing_temperature_values": missing_temperature_values,
-        "duplicate_timestamp_rows": duplicate_timestamp_rows,
-        "irregular_intervals": irregular_intervals,
-        "other_equipment": int((result["Category"] == "Other").sum()),
-    }
-
-
 def parse_testo(uploaded):
     # Testo Smart CSV uses semicolon separator and one timestamp column.
     raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
@@ -377,7 +346,7 @@ def pdf_top5_chart(alarm_df):
     chart.categoryAxis.categoryNames = [str(v)[:38] for v in top["Equipment"]]
     chart.valueAxis.valueMin = 0
     chart.valueAxis.labels.fontSize = 7
-    chart.valueAxis.valueLabelFormat = "%.0fh"
+    chart.valueAxis.labelTextFormat = "%.0fh"
     chart.categoryAxis.labels.fontSize = 6.5
     chart.bars[0].fillColor = colors.HexColor("#E84A5F")
     chart.bars[0].strokeColor = colors.HexColor("#E84A5F")
@@ -387,6 +356,7 @@ def pdf_top5_chart(alarm_df):
 
 
 def build_pdf_report(result, data, median_interval, raw=None):
+    # FINAL REVISION: Data Quality section intentionally removed from dashboard and PDF.
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=landscape(A4),
@@ -428,7 +398,6 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ["Exceeded By", "Longest Continuous"], ascending=[False, False]
     ).copy()
 
-    quality = data_quality_report(raw, data, result, median_interval) if raw is not None else None
     story = []
 
     # 1 Executive Summary
@@ -651,31 +620,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ]))
         story.append(stp)
 
-    # 5 Data Quality & recurrence
+    # 5 Repeated Excursions & Recovery Interval
     story.append(PageBreak())
-    story.append(Paragraph("5. Data Quality & Recurrence Analysis", h1))
-    if quality:
-        qd = [
-            ["Check","Result","Interpretation"],
-            ["CSV rows",str(quality["rows"]),"Source rows read from Testo CSV."],
-            ["Measurement columns",str(quality["measurement_columns"]),"Temperature series analyzed."],
-            ["Valid timestamps",str(quality["valid_timestamps"]),"Successfully parsed timestamps."],
-            ["Missing timestamps",str(quality["missing_timestamps"]),"Rows without usable timestamps."],
-            ["Missing/non-numeric temperatures",str(quality["missing_temperature_values"]),"Values not usable as temperature readings."],
-            ["Duplicate timestamps",str(quality["duplicate_timestamp_rows"]),"Duplicate timestamps within equipment series."],
-            ["Irregular sampling gaps",str(quality["irregular_intervals"]),"Gaps > 1.5× detected median interval."],
-            ["Other / unmapped equipment",str(quality["other_equipment"]),"Requires category mapping."],
-        ]
-        qt=Table(qd,colWidths=[65*mm,35*mm,130*mm],repeatRows=1)
-        qt.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
-            ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),7.5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-        ]))
-        story.append(qt)
-
-    story.append(Paragraph("Repeated Excursions & Recovery Interval", h1))
+    story.append(Paragraph("5. Repeated Excursions & Recovery Interval", h1))
     repeat = result[result["Excursion Count"] >= 2].sort_values(
         ["Excursion Count","Longest Continuous"],ascending=[False,False]
     )
@@ -725,7 +672,6 @@ if uploaded:
     try:
         data, raw = parse_testo(uploaded)
         result, median_interval = analyze(data)
-        quality = data_quality_report(raw, data, result, median_interval)
 
         equipment_count = result["Equipment"].nunique()
         st.success(
@@ -792,7 +738,7 @@ if uploaded:
             )
             st.plotly_chart(
                 donut,
-                use_container_width=True,
+                width="stretch",
                 config={"displayModeBar": False},
             )
 
@@ -822,17 +768,16 @@ if uploaded:
             )
             st.plotly_chart(
                 bar,
-                use_container_width=True,
+                width="stretch",
                 config={"displayModeBar": False},
             )
 
-        # Phase 1 enhancements: repeated excursions, recovery interval and data quality.
+        # Phase 1 enhancements: repeated excursions and recovery interval.
         repeated_df = result[result["Excursion Count"] >= 2].copy()
         st.markdown("**Additional Analysis**")
-        a1, a2, a3 = st.columns(3)
+        a1, a2 = st.columns(2)
         a1.metric("Repeated Excursion Units", len(repeated_df))
         a2.metric("Total Excursions", int(result["Excursion Count"].sum()))
-        a3.metric("Irregular Sampling Gaps", quality["irregular_intervals"])
 
         if not repeated_df.empty:
             top_repeat = repeated_df.sort_values(
@@ -846,13 +791,6 @@ if uploaded:
                 f"Average interval between excursions: **"
                 f"{format_duration(top_repeat['Avg Recovery Interval']) if pd.notna(top_repeat['Avg Recovery Interval']) else '—'}**."
             )
-
-        st.markdown("**Data Quality**")
-        q1, q2, q3, q4 = st.columns(4)
-        q1.metric("Valid timestamps", quality["valid_timestamps"])
-        q2.metric("Missing timestamps", quality["missing_timestamps"])
-        q3.metric("Duplicate timestamps", quality["duplicate_timestamp_rows"])
-        q4.metric("Other / Unmapped", quality["other_equipment"])
 
         # Management-oriented findings: concise, data-derived and actionable.
         st.markdown("**Key Findings**")
@@ -990,7 +928,7 @@ if uploaded:
 
         st.dataframe(
             show[table_cols].style.apply(status_style, axis=1),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -1025,7 +963,7 @@ if uploaded:
                 annotation_text=f"PPHG limit {limit:g}°C"
             )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         d1, d2, d3 = st.columns(3)
         d1.metric("Longest Continuous", format_duration(selected_result["Longest Continuous"]))
