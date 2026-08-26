@@ -298,6 +298,14 @@ if uploaded:
             "Longest Continuous"
         ].apply(format_duration)
 
+        display["Longest Start"] = pd.to_datetime(
+            display["Longest Start"], errors="coerce"
+        ).dt.strftime("%d-%m-%Y %H:%M").fillna("—")
+
+        display["Longest End"] = pd.to_datetime(
+            display["Longest End"], errors="coerce"
+        ).dt.strftime("%d-%m-%Y %H:%M").fillna("—")
+
         st.dataframe(
             display[
                 [
@@ -307,6 +315,8 @@ if uploaded:
                     "Average °C",
                     "Max °C",
                     "Alarm Limit",
+                    "Longest Start",
+                    "Longest End",
                     "Longest Continuous",
                     "Status",
                 ]
@@ -356,6 +366,31 @@ if uploaded:
         export["Longest Continuous"] = export[
             "Longest Continuous"
         ].apply(format_duration)
+
+        d1, d2, d3 = st.columns(3)
+
+        d1.metric(
+            "Longest Continuous",
+            format_duration(selected_result["Longest Continuous"]),
+        )
+
+        d2.metric(
+            "Excursion Start",
+            (
+                selected_result["Longest Start"].strftime("%d-%m-%Y %H:%M")
+                if pd.notna(selected_result["Longest Start"])
+                else "—"
+            ),
+        )
+
+        d3.metric(
+            "Excursion End",
+            (
+                selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
+                if pd.notna(selected_result["Longest End"])
+                else "—"
+            ),
+        )
 
         st.download_button(
             "Download Analysis CSV",
