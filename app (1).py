@@ -575,6 +575,15 @@ if uploaded:
         alarms = int((result["Status"] == "ALARM").sum())
         warnings = int((result["Status"] == "WARNING").sum())
         normal = int((result["Status"] == "NORMAL").sum())
+        other_status = max(equipment_count - alarms - warnings - normal, 0)
+
+        # ------------------------------------------------------------
+        # Executive Summary
+        # ------------------------------------------------------------
+        st.subheader("Executive Summary")
+        st.caption(
+            "Overview of equipment status based on PPHG temperature excursion analysis."
+        )
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Equipment", equipment_count)
@@ -582,34 +591,116 @@ if uploaded:
         c3.metric("🟠 Warning", warnings)
         c4.metric("🟢 Normal", normal)
 
+        chart_left, chart_right = st.columns(2)
+
+        # Status distribution donut.
+        status_df = pd.DataFrame({
+            "Status": ["Alarm", "Warning", "Normal", "Other / N/A"],
+            "Count": [alarms, warnings, normal, other_status],
+        })
+        status_df = status_df[status_df["Count"] > 0]
+
+        with chart_left:
+            st.markdown("**Status Distribution**")
+            donut = px.pie(
+                status_df,
+                names="Status",
+                values="Count",
+                hole=0.58,
+            )
+            donut.update_traces(
+                textposition="inside",
+                textinfo="percent",
+                hovertemplate="%{label}: %{value} equipment<extra></extra>",
+            )
+            donut.update_layout(
+                margin=dict(l=10, r=10, t=20, b=10),
+                legend=dict(orientation="v"),
+                showlegend=True,
+            )
+            st.plotly_chart(
+                donut,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
+        # Status count bar chart. This is a distribution, not a historical trend.
+        with chart_right:
+            st.markdown("**Status Count**")
+            bar = px.bar(
+                status_df,
+                x="Status",
+                y="Count",
+                text="Count",
+            )
+            bar.update_traces(
+                textposition="outside",
+                hovertemplate="%{x}: %{y} equipment<extra></extra>",
+            )
+            bar.update_layout(
+                margin=dict(l=10, r=10, t=20, b=10),
+                xaxis_title=None,
+                yaxis_title="Equipment",
+                showlegend=False,
+            )
+            st.plotly_chart(
+                bar,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
+        # Management-oriented findings: concise, data-derived and actionable.
+        st.markdown("**Key Findings**")
+        findings = []
+
+        if alarms:
+            alarm_df = result[result["Status"] == "ALARM"].copy()
+            alarm_df = alarm_df.sort_values(
+                ["Exceeded By", "Longest Continuous"],
+                ascending=[False, False],
+            )
+            urgent = int(
+                (
+                    alarm_df["Longest Continuous"]
+                    > pd.Timedelta(hours=24)
+                ).sum()
+            )
+            findings.append(
+                f"**{alarms} equipment** meet the PPHG alarm-duration criterion."
+            )
+            if urgent:
+                findings.append(
+                    f"**{urgent} equipment** have a continuous excursion exceeding "
+                    f"24 hours and should receive priority operational review."
+                )
+
+            top = alarm_df.iloc[0]
+            findings.append(
+                f"Longest current excursion: **{top['Equipment']}** — "
+                f"{format_duration(top['Longest Continuous'])}, "
+                f"peak **{top['Peak During Excursion °C']:.1f}°C**."
+            )
+
+        if warnings:
+            findings.append(
+                f"**{warnings} equipment** recorded excursions below the PPHG "
+                f"alarm-duration threshold and should be monitored for recurrence."
+            )
+
+        if other_status:
+            findings.append(
+                f"**{other_status} measurement point(s)** are not classified as "
+                f"Chiller/Freezer and should be mapped after Testo naming is made unique."
+            )
+
+        if not findings:
+            findings.append("No PPHG Chiller/Freezer alarm-duration excursions were identified.")
+
+        for finding in findings:
+            st.markdown(f"• {finding}")
+
         st.divider()
         st.subheader("PPHG Analysis")
-
-        # Filters for the analysis table
-        f1, f2 = st.columns(2)
-        category_options = ["All"] + sorted(result["Category"].dropna().unique().tolist())
-        status_options = ["All"] + ["ALARM", "WARNING", "NORMAL", "N/A"]
-
-        selected_category = f1.selectbox(
-            "Filter by category",
-            category_options,
-            key="analysis_category_filter",
-        )
-        selected_status = f2.selectbox(
-            "Filter by status",
-            status_options,
-            key="analysis_status_filter",
-        )
-
-        filtered_result = result.copy()
-        if selected_category != "All":
-            filtered_result = filtered_result[
-                filtered_result["Category"] == selected_category
-            ]
-        if selected_status != "All":
-            filtered_result = filtered_result[
-                filtered_result["Status"] == selected_status
-            ]
 
         # PPHG criteria are shown as highlights instead of a table column.
         st.markdown(
@@ -623,11 +714,7 @@ if uploaded:
             unsafe_allow_html=False,
         )
 
-        if filtered_result.empty:
-            st.warning("Tidak ada equipment yang sesuai dengan filter.")
-            st.stop()
-
-        show = filtered_result.copy()
+        show = result.copy()
         for col in ["Min °C", "Average °C", "Max °C", "Peak During Excursion °C"]:
             show[col] = show[col].map(
                 lambda x: f"{x:.1f}" if pd.notna(x) else "—"
@@ -669,7 +756,7 @@ if uploaded:
 
         selected = st.selectbox(
             "Select equipment",
-            filtered_result["Equipment"].tolist()
+            result["Equipment"].tolist()
         )
 
         selected_result = result[result["Equipment"] == selected].iloc[0]
