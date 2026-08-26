@@ -356,7 +356,7 @@ def build_pdf_report(result, data, median_interval):
 
     headers = [
         "Equipment", "Cat.", "Min °C", "Avg °C", "Max °C",
-        "Limit", "Start", "End", "Continuous", "Exceeded", "Status"
+        "Start", "End", "Continuous", "Exceeded", "Status"
     ]
     table_data = [headers]
     for _, r in result.iterrows():
@@ -368,16 +368,15 @@ def build_pdf_report(result, data, median_interval):
             f"{r['Min °C']:.1f}",
             f"{r['Average °C']:.1f}",
             f"{r['Max °C']:.1f}",
-            str(r["Alarm Limit"]),
             start_txt,
             end_txt,
             format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
-            str(r["Status"]),
+            ("N/A" if r["Category"] == "Other" else str(r["Status"])),
         ])
 
-    col_widths = [48*mm, 17*mm, 15*mm, 15*mm, 15*mm, 27*mm,
-                  25*mm, 25*mm, 27*mm, 24*mm, 18*mm]
+    col_widths = [52*mm, 18*mm, 15*mm, 15*mm, 15*mm, 27*mm,
+                  27*mm, 28*mm, 25*mm, 18*mm]
     at = Table(table_data, colWidths=col_widths, repeatRows=1)
     style_cmds = [
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324D")),
@@ -703,9 +702,7 @@ if uploaded:
             selected_result["Longest End"].strftime("%d-%m-%Y %H:%M")
             if pd.notna(selected_result["Longest End"]) else "—"
         )
-
-        export = result.copy()
-        for col in ["Longest Continuous", "Exceeded By"]:
+for col in ["Longest Continuous", "Exceeded By"]:
             export[col] = export[col].map(
                 lambda x: format_duration(x) if pd.notna(x) else "—"
             )
@@ -715,15 +712,7 @@ if uploaded:
         export["Longest End"] = pd.to_datetime(
             export["Longest End"], errors="coerce"
         ).dt.strftime("%Y-%m-%d %H:%M")
-
-        st.download_button(
-            "Download Analysis CSV",
-            export.to_csv(index=False).encode("utf-8-sig"),
-            "pphg_temperature_analysis.csv",
-            "text/csv",
-        )
-
-        pdf_bytes = build_pdf_report(result, data, median_interval)
+pdf_bytes = build_pdf_report(result, data, median_interval)
         st.download_button(
             "📄 Download PPHG PDF Report",
             pdf_bytes,
