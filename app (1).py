@@ -147,7 +147,12 @@ def excursion_stats(g, category, median_interval):
         if recovery else pd.NaT
     )
 
-    status = "ALARM" if best["duration"] >= rule["delay"] else "WARNING"
+    if best["duration"] <= pd.Timedelta(0):
+        status = "SINGLE POINT"
+    elif best["duration"] >= rule["delay"]:
+        status = "ALARM"
+    else:
+        status = "WARNING"
 
     return {
         "duration": best["duration"],
@@ -325,7 +330,7 @@ def pdf_status_chart(result):
         int((result["Status"] == "ALARM").sum()),
         int((result["Status"] == "WARNING").sum()),
         int((result["Status"] == "NORMAL").sum()),
-        int((result["Category"] == "Other").sum()),
+        int((result["Category"] == "Other").sum()) + int((result["Status"] == "SINGLE POINT").sum()),
     ]
     labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
     fills = [
@@ -412,6 +417,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
     other = int((result["Category"] == "Other").sum())
+    single_point = int((result["Status"] == "SINGLE POINT").sum())
+    other_na = other + single_point
     urgent = int((
         result.loc[result["Status"] == "ALARM", "Longest Continuous"]
         > pd.Timedelta(hours=24)
@@ -434,8 +441,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
         f"<b>{urgent}</b> alarm unit(s) have continuous excursions exceeding 24 hours "
         f"and should receive priority operational review."
     )
-    if other:
-        text += f" <b>{other}</b> point(s) are Other/N/A and require category mapping."
+    if other_na:
+        text += f" <b>{other_na}</b> point(s) are Other/N/A or single-point excursions requiring review."
     story.append(Paragraph(text, conclusion))
 
     kpi = Table([[
@@ -620,6 +627,29 @@ def build_pdf_report(result, data, median_interval, raw=None):
             "multiple excursions are detected or duration approaches the alarm delay.",
             note
         ))
+
+    single_df = result[result["Status"] == "SINGLE POINT"]
+    if not single_df.empty:
+        story.append(Paragraph("Single-Point Excursions", h1))
+        story.append(Paragraph(
+            "A threshold excursion was detected at one measurement point, but no elapsed duration "
+            "can be established. These points are not classified as WARNING or ALARM.", body
+        ))
+        sp = [["Equipment", "Category", "Observed °C", "Timestamp"]]
+        for _, r in single_df.iterrows():
+            ts = r["Longest Start"].strftime("%d-%m-%Y %H:%M") if pd.notna(r["Longest Start"]) else "—"
+            sp.append([Paragraph(str(r["Equipment"]), small), str(r["Category"]),
+                       f"{r['Peak During Excursion °C']:.1f}", ts])
+        stp = Table(sp, colWidths=[85*mm,25*mm,30*mm,55*mm], repeatRows=1)
+        stp.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF7D6")),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#7A5A00")),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("FONTSIZE",(0,0),(-1,-1),7),
+            ("ALIGN",(1,1),(-1,-1),"CENTER"),
+        ]))
+        story.append(stp)
 
     # 5 Data Quality & recurrence
     story.append(PageBreak())
