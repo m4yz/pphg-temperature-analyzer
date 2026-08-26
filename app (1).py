@@ -93,12 +93,7 @@ def longest_continuous(g, category, median_interval):
         return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
 
     duration, start, end, peak = best
-    if pd.isna(duration) or duration <= pd.Timedelta(0):
-        status = "NORMAL"
-    elif duration >= rule["delay"]:
-        status = "ALARM"
-    else:
-        status = "WARNING"
+    status = "ALARM" if duration >= rule["delay"] else "WARNING"
     return duration, start, end, peak, status
 
 def parse_testo(uploaded):
@@ -201,10 +196,17 @@ def analyze(df):
     out = pd.DataFrame(rows)
     order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
     out["_order"] = out["Status"].map(order).fillna(9)
+
+    # Report priority:
+    # ALARM -> largest Exceeded By first
+    # WARNING/NORMAL -> longest continuous excursion first
+    # N/A -> last
+    out["_priority_exceeded"] = out["Exceeded By"].fillna(pd.Timedelta(0))
+    out["_priority_continuous"] = out["Longest Continuous"].fillna(pd.Timedelta(0))
     out = out.sort_values(
-        ["_order", "Longest Continuous"],
-        ascending=[True, False]
-    ).drop(columns="_order")
+        ["_order", "_priority_exceeded", "_priority_continuous"],
+        ascending=[True, False, False]
+    ).drop(columns=["_order", "_priority_exceeded", "_priority_continuous"])
     return out, median_interval
 
 
@@ -486,7 +488,6 @@ def build_pdf_report(result, data, median_interval):
         ))
 
     if warnings:
-        story.append(PageBreak())
         story.append(Paragraph("WARNING Equipment", h1))
         warning_df = result[result["Status"] == "WARNING"].copy()
         warning_df["excess_min"] = warning_df["Exceeded By"].dt.total_seconds()/60
