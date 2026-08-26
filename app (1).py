@@ -296,11 +296,11 @@ def pdf_status_chart(result):
     ]
 
     from reportlab.graphics.shapes import String, Rect
-    d = Drawing(320, 145)
+    d = Drawing(300, 135)
 
     # Donut only — no center total, so it cannot collide with the chart.
     pie = Pie()
-    pie.x, pie.y, pie.width, pie.height = 18, 12, 120, 120
+    pie.x, pie.y, pie.width, pie.height = 12, 8, 112, 112
     pie.data = counts
     pie.labels = ["" for _ in counts]
     pie.slices[0].fillColor = fills[0]
@@ -312,7 +312,7 @@ def pdf_status_chart(result):
 
     # Manual legend: fixed positions prevent ReportLab Legend from
     # overflowing into the adjacent Status Count chart.
-    y = 108
+    y = 103
     for label, count, fill in zip(labels, counts, fills):
         if count <= 0:
             continue
@@ -341,9 +341,9 @@ def pdf_status_count_chart(alarm_df):
     ]
 
     from reportlab.graphics.shapes import String, Rect, Line
-    d = Drawing(430, 155)
-    left, right = 48, 410
-    bottom, top = 22, 125
+    d = Drawing(405, 135)
+    left, right = 44, 390
+    bottom, top = 20, 110
     grid_max = max(10, ((max(counts) + 1) // 2) * 2)
 
     for tick in range(0, grid_max + 1, 2):
@@ -370,8 +370,6 @@ def pdf_status_count_chart(alarm_df):
                      fontName="Helvetica", fontSize=6.8,
                      textAnchor="middle", fillColor=colors.HexColor("#667481")))
 
-    d.add(String(8, 72, "Equipment", fontName="Helvetica", fontSize=6.8,
-                 fillColor=colors.HexColor("#667481"), angle=90))
     return d
 
 def build_pdf_report(result, data, median_interval, raw=None):
@@ -455,42 +453,65 @@ def build_pdf_report(result, data, median_interval, raw=None):
         callout
     ))
 
-    # Keep PDF Executive Summary aligned with the dashboard:
-    # 4 KPIs + Status Distribution donut + Status Count bar.
-    other_status = max(len(result) - alarms - warnings - normal, 0)
-    kpi = Table([[
-        Paragraph(f"<b>Equipment</b><br/><font size=16 color='#17324D'>{len(result)}</font>", body),
-        Paragraph(f"<b>Alarm</b><br/><font size=16 color='#E84A5F'>{alarms}</font>", body),
-        Paragraph(f"<b>Warning</b><br/><font size=16 color='#FF8A4C'>{warnings}</font>", body),
-        Paragraph(f"<b>Normal</b><br/><font size=16 color='#4CCB88'>{normal}</font>", body),
-    ]], colWidths=[62*mm,62*mm,62*mm,62*mm])
+    # Dashboard-matched KPI row. Use separate label/value rows so the
+    # numbers can never collide with the labels.
+    kpi_labels = [
+        Paragraph("<b>Equipment</b>", small),
+        Paragraph("<b>Alarm</b>", small),
+        Paragraph("<b>Warning</b>", small),
+        Paragraph("<b>Normal</b>", small),
+    ]
+    kpi_values = [
+        Paragraph(f"<font size=17 color='#17324D'>{len(result)}</font>", body),
+        Paragraph(f"<font size=17 color='#E84A5F'>{alarms}</font>", body),
+        Paragraph(f"<font size=17 color='#FF8A4C'>{warnings}</font>", body),
+        Paragraph(f"<font size=17 color='#4CCB88'>{normal}</font>", body),
+    ]
+    kpi = Table([kpi_labels, kpi_values], colWidths=[66*mm]*4, rowHeights=[6.5*mm, 9*mm])
     kpi.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(0,1),colors.HexColor("#F3F7FA")),
+        ("BACKGROUND",(1,0),(1,1),colors.HexColor("#FFF0F0")),
+        ("BACKGROUND",(2,0),(2,1),colors.HexColor("#FFF4E6")),
+        ("BACKGROUND",(3,0),(3,1),colors.HexColor("#EAF8F0")),
+        ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
+        ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ALIGN",(0,0),(-1,-1),"LEFT"),
-        ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+        ("LEFTPADDING",(0,0),(-1,-1),5),
+        ("RIGHTPADDING",(0,0),(-1,-1),5),
+        ("TOPPADDING",(0,0),(-1,-1),0),
+        ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story.append(kpi)
-    story.append(Spacer(1,2*mm))
+    story.append(Spacer(1,4*mm))
 
     global _CURRENT_RESULT_FOR_PDF
     _CURRENT_RESULT_FOR_PDF = result
+
+    # Give the two dashboard charts equal, generous columns. Keep headings
+    # separate from the chart box to avoid any visual collision.
     chart_labels = Table([[
         Paragraph("<b>Status Distribution</b>", h2),
         Paragraph("<b>Status Count</b>", h2),
-    ]], colWidths=[118*mm,132*mm])
+    ]], colWidths=[125*mm,125*mm], rowHeights=[7*mm])
     chart_labels.setStyle(TableStyle([
-        ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("LEFTPADDING",(0,0),(-1,-1),2), ("RIGHTPADDING",(0,0),(-1,-1),2),
         ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("VALIGN",(0,0),(-1,-1),"BOTTOM"),
     ]))
     story.append(chart_labels)
+
     charts = Table([[pdf_status_chart(result), pdf_status_count_chart(alarm_df)]],
-                   colWidths=[118*mm,132*mm])
+                   colWidths=[125*mm,125*mm], rowHeights=[43*mm])
     charts.setStyle(TableStyle([
-        ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
+        ("BOX",(0,0),(-1,-1),0.45,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-        ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),
-        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ("ALIGN",(0,0),(-1,-1),"CENTER"),
+        ("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("TOPPADDING",(0,0),(-1,-1),1),("BOTTOMPADDING",(0,0),(-1,-1),1),
     ]))
     story.append(charts)
+    story.append(Spacer(1,3*mm))
 
     story.append(Paragraph("Priority Overview", h2))
     priority_rows = [["Rank","Equipment","Status","Continuous","Exceeded By","Peak °C"]]
