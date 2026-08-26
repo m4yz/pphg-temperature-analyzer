@@ -164,7 +164,6 @@ def excursion_stats(g, category, median_interval):
     }
 
 
-@st.cache_data(show_spinner=False)
 def parse_testo(uploaded):
     # Testo Smart CSV uses semicolon separator and one timestamp column.
     raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
@@ -213,7 +212,6 @@ def parse_testo(uploaded):
 
     return pd.concat(records, ignore_index=True), raw
 
-@st.cache_data(show_spinner=False)
 def analyze(df):
     rows = []
     intervals = []
@@ -781,24 +779,12 @@ def build_pdf_report(result, data, median_interval, raw=None):
 
 
 
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def generate_pdf_cached(result_json, median_minutes, analysis_start, analysis_end):
-    """Cache generated PDF so repeated downloads do not rebuild the report."""
-    result_df = pd.read_json(result_json, orient="split")
-    median_interval = pd.Timedelta(minutes=float(median_minutes))
-    period_data = pd.DataFrame({
-        "Timestamp": pd.to_datetime([analysis_start, analysis_end])
-    })
-    return build_pdf_report(result_df, period_data, median_interval, raw=None)
-
 uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 
 if uploaded:
     try:
-        with st.spinner("Reading Testo CSV and analyzing equipment..."):
-            data, raw = parse_testo(uploaded)
-            result, median_interval = analyze(data)
+        data, raw = parse_testo(uploaded)
+        result, median_interval = analyze(data)
 
         equipment_count = result["Equipment"].nunique()
         st.success(
@@ -1106,17 +1092,13 @@ if uploaded:
             if pd.notna(selected_result["Longest End"]) else "—"
         )
         st.markdown("---")
+        st.markdown("---")
         st.subheader("📄 PDF Report")
         st.caption("Generate the PDF only when needed to keep the dashboard responsive.")
         if st.button("📄 Generate PDF Report", type="primary", width="stretch", key="generate_pphg_pdf"):
             try:
                 with st.spinner("Generating PDF report..."):
-                    pdf_bytes = generate_pdf_cached(
-                        result.to_json(orient="split", date_format="iso"),
-                        float(median_interval.total_seconds() / 60.0),
-                        str(pd.to_datetime(data["Timestamp"]).min()),
-                        str(pd.to_datetime(data["Timestamp"]).max()),
-                    )
+                    pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
                 st.session_state["pphg_pdf_bytes"] = pdf_bytes
                 st.success("PDF report siap di-download.")
             except Exception as pdf_error:
