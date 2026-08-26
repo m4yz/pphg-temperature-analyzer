@@ -233,7 +233,7 @@ def analyze(df):
         if category in RULES:
             rule = RULES[category]
             exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
-            limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
+            limit_text = f"≥{float(rule['limit']):g}°C / {float(rule['delay'].total_seconds()/3600):g}h"
         else:
             exceeded = pd.Timedelta(0)
             limit_text = "N/A"
@@ -387,6 +387,15 @@ def _pdf_short_name(name, n=40):
     return s if len(s) <= n else s[:n-1] + "…"
 
 
+
+def _interval_minutes(value):
+    """Return a numeric sampling interval in minutes, regardless of input type."""
+    try:
+        return float(pd.to_timedelta(value).total_seconds() / 60.0)
+    except Exception:
+        return float(value)
+
+
 def build_pdf_report(result, data, median_interval, raw=None):
     """Clean 5-page management report. Dashboard and PDF intentionally use different density."""
     buf = BytesIO()
@@ -468,7 +477,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     callout = Table(
         [[Paragraph(
             f"<b>Overall Assessment: {'ATTENTION REQUIRED' if alarm else 'NO ALARM IDENTIFIED'}</b>"
-            f"{period} • Sampling interval: approximately {median_interval:g} min",
+            f"{period} • Sampling interval: approximately {_interval_minutes(median_interval):g} min",
             body
         )]],
         colWidths=[178*mm],
