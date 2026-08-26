@@ -1089,26 +1089,27 @@ if uploaded:
             if pd.notna(selected_result["Longest End"]) else "—"
         )
         st.markdown("---")
+        st.markdown("---")
         st.subheader("📄 PDF Report")
-        try:
-            pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
+        st.caption("Generate the PDF only when needed to keep the dashboard responsive.")
+        if st.button("📄 Generate PDF Report", type="primary", width="stretch", key="generate_pphg_pdf"):
+            try:
+                with st.spinner("Generating PDF report..."):
+                    pdf_bytes = build_pdf_report(result, data, median_interval, raw=raw)
+                st.session_state["pphg_pdf_bytes"] = pdf_bytes
+                st.success("PDF report siap di-download.")
+            except Exception as pdf_error:
+                st.session_state.pop("pphg_pdf_bytes", None)
+                st.error(f"PDF report gagal dibuat: {pdf_error}")
+
+        if "pphg_pdf_bytes" in st.session_state:
             st.download_button(
-                label="📄 Download PPHG PDF Report",
-                data=pdf_bytes,
+                label="⬇️ Download PPHG PDF Report",
+                data=st.session_state["pphg_pdf_bytes"],
                 file_name="PPHG_Temperature_Analysis_Report.pdf",
                 mime="application/pdf",
-                type="primary",
                 width="stretch",
                 key="download_pphg_pdf",
             )
-        except Exception as pdf_error:
-            st.error(f"PDF report gagal dibuat: {pdf_error}")
-        st.download_button(
-            "📄 Download PPHG PDF Report",
-            pdf_bytes,
-            "PPHG_Temperature_Analysis_Report.pdf",
-            "application/pdf",
-        )
-
     except Exception as e:
         st.error(f"CSV tidak dapat diproses: {e}")
