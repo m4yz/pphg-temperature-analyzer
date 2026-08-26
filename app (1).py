@@ -212,6 +212,18 @@ def parse_testo(uploaded):
 
     return pd.concat(records, ignore_index=True), raw
 
+def normalize_categories(df):
+    """Map the three known Other measurement points to Chiller."""
+    df = df.copy()
+    other_to_chiller = {
+        "Kitchen Lt.90 – K.UPCS.1",
+        "Kitchen Lt.90 – WCH.1",
+        "Kitchen Lt.90 – WCH.2",
+    }
+    df.loc[df["Equipment"].isin(other_to_chiller), "Category"] = "Chiller"
+    return df
+
+
 def analyze(df):
     rows = []
     intervals = []
@@ -789,6 +801,7 @@ uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 if uploaded:
     try:
         data, raw = parse_testo(uploaded)
+        data = normalize_categories(data)
         result, median_interval = analyze(data)
 
         equipment_count = result["Equipment"].nunique()
