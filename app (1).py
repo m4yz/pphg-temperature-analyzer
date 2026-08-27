@@ -179,47 +179,54 @@ def excursion_stats(g, category, median_interval):
     }
 
 
-def parse_testo(uploaded):
-    # Testo Smart CSV uses semicolon separator and one timestamp column.
-    raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
-    if raw.shape[1] < 2:
-        raise ValueError("CSV Testo tidak berisi kolom measurement.")
-
-    timestamp_col = raw.columns[0]
-    timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
-    valid_time = timestamps.notna()
-    if valid_time.sum() < 2:
-        raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
+def parse_testo(uploaded_files):
+    """Parse one or more Testo CSV exports and combine all measurements."""
+    if not uploaded_files:
+        raise ValueError("Belum ada CSV Testo yang dipilih.")
 
     records = []
+    raw_frames = []
+    file_names = []
 
-    # IMPORTANT: every measurement column present in the uploaded CSV is
-    # analyzed. There is no required equipment count and no positional list.
-    for col in raw.columns[1:]:
-        values = pd.to_numeric(raw[col], errors="coerce")
-        mask = valid_time & values.notna()
-        if mask.sum() == 0:
+    for uploaded in uploaded_files:
+        raw = pd.read_csv(uploaded, sep=";", encoding="utf-8-sig")
+        if raw.shape[1] < 2:
             continue
 
-        # Testo column names are typically "<equipment>: Temperature (°C)".
-        equipment_name = str(col).split(": Temperature")[0].strip()
-        category = category_from_name(equipment_name)
+        raw_frames.append(raw)
+        file_names.append(getattr(uploaded, "name", "Testo CSV"))
 
-        temp = pd.DataFrame({
-            "Timestamp": timestamps[mask].values,
-            "Equipment": equipment_name,
-            "Temperature": values[mask].values,
-            "Category": category,
-        })
-        records.append(temp)
+        timestamp_col = raw.columns[0]
+        timestamps = pd.to_datetime(raw[timestamp_col], errors="coerce")
+        valid_time = timestamps.notna()
+
+        # Analyze every measurement column actually present in this file.
+        for col in raw.columns[1:]:
+            values = pd.to_numeric(raw[col], errors="coerce")
+            mask = valid_time & values.notna()
+            if mask.sum() == 0:
+                continue
+
+            equipment_name = str(col).split(": Temperature")[0].strip()
+            category = category_from_name(equipment_name)
+
+            records.append(pd.DataFrame({
+                "Timestamp": timestamps[mask].values,
+                "Equipment": equipment_name,
+                "Temperature": values[mask].values,
+                "Category": category,
+                "Source File": getattr(uploaded, "name", "Testo CSV"),
+            }))
 
     if not records:
-        raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
+        raise ValueError("Tidak ada measurement temperature yang dapat dibaca dari CSV.")
 
     data = pd.concat(records, ignore_index=True)
     data = data.sort_values(["Equipment", "Timestamp"]).reset_index(drop=True)
 
-    return data, raw
+    # Keep raw data available for compatibility with the existing report flow.
+    raw = pd.concat(raw_frames, ignore_index=True, sort=False) if raw_frames else pd.DataFrame()
+    return data, raw, file_names
 
 def analyze(df):
     rows = []
@@ -793,11 +800,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
 
 
 
-uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
+uploaded = st.file_uploader("Upload Testo CSV", type=["csv"], accept_multiple_files=True)
 
 if uploaded:
     try:
-        data, raw = parse_testo(uploaded)
+        data, raw, source_files = parse_testo(uploaded)
         result, median_interval = analyze(data)
 
         equipment_count = result["Equipment"].nunique()
