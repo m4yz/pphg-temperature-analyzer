@@ -27,34 +27,49 @@ RULES = {
     "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
 }
 
-# The current Testo CSV has duplicate display names. Until naming is cleaned up
-# in Testo, identify the duplicate L90 instruments by their column position.
-COLUMN_MAPPING = {
-    0: ("Eden Bar", "Chiller"),
-    1: ("RL Kitchen – Showcase Chiller", "Chiller"),
-    2: ("RL Kitchen – Upright Chiller 1", "Chiller"),
-    3: ("RL Kitchen – Upright Chiller 2", "Chiller"),
-    4: ("RL Kitchen – Upright Chiller 3", "Chiller"),
-    5: ("RL Kitchen – Upright Freezer (2 Drawer)", "Freezer"),
-    6: ("RL Kitchen – Undercounter Chiller", "Chiller"),
-    7: ("RL Kitchen – Upright Chiller (2 Drawer)", "Chiller"),
-    8: ("RL Kitchen – Freezer GEA 1", "Freezer"),
-    9: ("RL Kitchen – Freezer GEA 3", "Freezer"),
-    10: ("RL Kitchen – Freezer GEA 2", "Freezer"),
-    11: ("Receiving – Freezer GEA 013", "Freezer"),
-    12: ("Receiving – Freezer GEA 012", "Freezer"),
-    13: ("Receiving – Freezer GEA 015", "Freezer"),
-    14: ("Receiving – Showcase Chiller 014", "Chiller"),
-    15: ("Kitchen 1 L90 – Upright Chiller 1 019", "Chiller"),
-    16: ("Kitchen 1 L90 – Upright Chiller 2 020", "Chiller"),
-    17: ("Kitchen 1 L90 – Upright Chiller 3 021", "Chiller"),
-    18: ("Kitchen 1 L90 – Upright Freezer 1 022", "Freezer"),
-    19: ("Canteen – Chiller", "Chiller"),
-    20: ("Kitchen Lt.90 – K.UPCS.1", "Other"),
-    21: ("Kitchen Lt.90 – WCH.1", "Other"),
-    22: ("Kitchen Lt.90 – WCH.2", "Other"),
-    23: ("Eden Bar – Chiller", "Chiller"),
+# Category mapping is name-based, not position-based.
+# The uploaded CSV determines which equipment exists. This dictionary only
+# assigns a PPHG category when the equipment name is known.
+EQUIPMENT_CATEGORY_MAP = {
+    "Eden Bar": "Chiller",
+    "RL Kitchen – Showcase Chiller": "Chiller",
+    "RL Kitchen – Upright Chiller 1": "Chiller",
+    "RL Kitchen – Upright Chiller 2": "Chiller",
+    "RL Kitchen – Upright Chiller 3": "Chiller",
+    "RL Kitchen – Upright Freezer (2 Drawer)": "Freezer",
+    "RL Kitchen – Undercounter Chiller": "Chiller",
+    "RL Kitchen – Upright Chiller (2 Drawer)": "Chiller",
+    "RL Kitchen – Freezer GEA 1": "Freezer",
+    "RL Kitchen – Freezer GEA 3": "Freezer",
+    "RL Kitchen – Freezer GEA 2": "Freezer",
+    "Receiving – Freezer GEA 013": "Freezer",
+    "Receiving – Freezer GEA 012": "Freezer",
+    "Receiving – Freezer GEA 015": "Freezer",
+    "Receiving – Showcase Chiller 014": "Chiller",
+    "Kitchen 1 L90 – Upright Chiller 1 019": "Chiller",
+    "Kitchen 1 L90 – Upright Chiller 2 020": "Chiller",
+    "Kitchen 1 L90 – Upright Chiller 3 021": "Chiller",
+    "Kitchen 1 L90 – Upright Freezer 1 022": "Freezer",
+    "Canteen – Chiller": "Chiller",
+    "Kitchen Lt.90 – K.UPCS.1": "Chiller",
+    "Kitchen Lt.90 – WCH.1": "Chiller",
+    "Kitchen Lt.90 – WCH.2": "Chiller",
+    "Eden Bar – Chiller": "Chiller",
 }
+
+def category_from_name(name):
+    """Resolve PPHG category from the actual CSV equipment name."""
+    name = str(name).strip()
+    if name in EQUIPMENT_CATEGORY_MAP:
+        return EQUIPMENT_CATEGORY_MAP[name]
+
+    low = name.lower()
+    if "freezer" in low:
+        return "Freezer"
+    if "chiller" in low:
+        return "Chiller"
+
+    return "Other"
 
 def format_duration(td):
     if pd.isna(td):
@@ -176,32 +191,23 @@ def parse_testo(uploaded):
     if valid_time.sum() < 2:
         raise ValueError("Kolom timestamp Testo tidak dapat dibaca.")
 
-    measurement_cols = list(raw.columns[1:])
     records = []
 
-    for idx, col in enumerate(measurement_cols):
+    # IMPORTANT: every measurement column present in the uploaded CSV is
+    # analyzed. There is no required equipment count and no positional list.
+    for col in raw.columns[1:]:
         values = pd.to_numeric(raw[col], errors="coerce")
         mask = valid_time & values.notna()
         if mask.sum() == 0:
             continue
 
-        if idx in COLUMN_MAPPING:
-            display_name, category = COLUMN_MAPPING[idx]
-        else:
-            # Future-proof: after Testo naming is cleaned up, use the actual name.
-            base = str(col).split(": Temperature")[0].strip()
-            low = base.lower()
-            if "freezer" in low:
-                category = "Freezer"
-            elif "chiller" in low:
-                category = "Chiller"
-            else:
-                category = "Other"
-            display_name = base
+        # Testo column names are typically "<equipment>: Temperature (°C)".
+        equipment_name = str(col).split(": Temperature")[0].strip()
+        category = category_from_name(equipment_name)
 
         temp = pd.DataFrame({
             "Timestamp": timestamps[mask].values,
-            "Equipment": display_name,
+            "Equipment": equipment_name,
             "Temperature": values[mask].values,
             "Category": category,
         })
@@ -210,19 +216,10 @@ def parse_testo(uploaded):
     if not records:
         raise ValueError("Tidak ada measurement temperature yang dapat dibaca.")
 
-    return pd.concat(records, ignore_index=True), raw
+    data = pd.concat(records, ignore_index=True)
+    data = data.sort_values(["Equipment", "Timestamp"]).reset_index(drop=True)
 
-def normalize_categories(df):
-    """Map the three known Other measurement points to Chiller."""
-    df = df.copy()
-    other_to_chiller = {
-        "Kitchen Lt.90 – K.UPCS.1",
-        "Kitchen Lt.90 – WCH.1",
-        "Kitchen Lt.90 – WCH.2",
-    }
-    df.loc[df["Equipment"].isin(other_to_chiller), "Category"] = "Chiller"
-    return df
-
+    return data, raw
 
 def analyze(df):
     rows = []
@@ -801,7 +798,6 @@ uploaded = st.file_uploader("Upload Testo CSV", type=["csv"])
 if uploaded:
     try:
         data, raw = parse_testo(uploaded)
-        data = normalize_categories(data)
         result, median_interval = analyze(data)
 
         equipment_count = result["Equipment"].nunique()
@@ -810,12 +806,13 @@ if uploaded:
             f"Sampling interval terdeteksi ≈ {round(median_interval.total_seconds()/60):g} menit."
         )
 
-        other_count = int((result["Category"] == "Other").sum())
-        if other_count:
+        unmapped = sorted(
+            result.loc[result["Category"] == "Other", "Equipment"].dropna().unique().tolist()
+        )
+        if unmapped:
             st.info(
-                f"{other_count} measurement dikategorikan Other karena belum aman "
-                f"diterapkan rule PPHG Chiller/Freezer. Setelah naming Testo dibuat unik, "
-                f"mapping kategori bisa disesuaikan."
+                f"{len(unmapped)} equipment belum memiliki mapping kategori dan "
+                "tetap dianalisis sebagai Other/N/A: " + ", ".join(unmapped)
             )
 
         alarms = int((result["Status"] == "ALARM").sum())
