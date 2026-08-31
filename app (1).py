@@ -309,14 +309,16 @@ def pdf_status_chart(result):
     alarms = int((result["Status"] == "ALARM").sum())
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
-    other_status = max(len(result) - alarms - warnings - normal, 0)
+    single = int((result["Status"] == "SINGLE POINT").sum())
+    na = int((result["Status"] == "N/A").sum())
 
-    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
-    counts = [alarms, warnings, normal, other_status]
+    labels = ["Alarm", "Warning", "Normal", "Single Point", "N/A"]
+    counts = [alarms, warnings, normal, single, na]
     fills = [
         colors.HexColor("#E84A5F"),
         colors.HexColor("#FF8A4C"),
         colors.HexColor("#4CCB88"),
+        colors.HexColor("#F4D35E"),
         colors.HexColor("#9AA3AD"),
     ]
 
@@ -354,14 +356,16 @@ def pdf_status_count_chart(alarm_df):
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
     equipment_count = len(result)
-    other_status = max(equipment_count - alarms - warnings - normal, 0)
+    single = int((result["Status"] == "SINGLE POINT").sum())
+    na = int((result["Status"] == "N/A").sum())
 
-    labels = ["Alarm", "Warning", "Normal", "Other / N/A"]
-    counts = [alarms, warnings, normal, other_status]
+    labels = ["Alarm", "Warning", "Normal", "Single Point", "N/A"]
+    counts = [alarms, warnings, normal, single, na]
     fills = [
         colors.HexColor("#E84A5F"),
         colors.HexColor("#FF8A4C"),
         colors.HexColor("#4CCB88"),
+        colors.HexColor("#F4D35E"),
         colors.HexColor("#9AA3AD"),
     ]
 
@@ -442,7 +446,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     alarms = int((result["Status"] == "ALARM").sum())
     warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
-    other = int((result["Category"] == "Other").sum())
+    other = int((result["Status"] == "N/A").sum())
     single = int((result["Status"] == "SINGLE POINT").sum())
     urgent = int((
         result.loc[result["Status"] == "ALARM", "Longest Continuous"]
@@ -504,13 +508,15 @@ def build_pdf_report(result, data, median_interval, raw=None):
         Paragraph(f"<b>Alarm</b><br/><font size=17 color='#E84A5F'>{alarms}</font>", kpi_text),
         Paragraph(f"<b>Warning</b><br/><font size=17 color='#FF8A4C'>{warnings}</font>", kpi_text),
         Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", kpi_text),
+        Paragraph(f"<b>Single Point</b><br/><font size=17 color='#B38B00'>{single}</font>", kpi_text),
     ]
-    kpi = Table([kpi_cells], colWidths=[69*mm]*4, rowHeights=[20*mm])
+    kpi = Table([kpi_cells], colWidths=[53.4*mm]*5, rowHeights=[20*mm])
     kpi.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F3F7FA")),
         ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0F0")),
         ("BACKGROUND",(2,0),(2,0),colors.HexColor("#FFF4E6")),
         ("BACKGROUND",(3,0),(3,0),colors.HexColor("#EAF8F0")),
+        ("BACKGROUND",(4,0),(4,0),colors.HexColor("#FFF8D9")),
         ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
         ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -521,7 +527,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(kpi)
-    story.append(Spacer(1,5*mm))
+    story.append(Paragraph(
+        "<b>Single Point</b> = threshold observed but no elapsed duration can be established. <b>N/A</b> = equipment could not be mapped to a PPHG group.",
+        note
+    ))
+    story.append(Spacer(1,4*mm))
 
     global _CURRENT_RESULT_FOR_PDF
     _CURRENT_RESULT_FOR_PDF = result
@@ -659,7 +669,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
             start, end, format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
             str(int(r["Threshold Events"])),
-            "N/A" if r["Category"]=="Other" else str(r["Status"])
+            str(r["Status"])
         ])
 
     # Same overall table footprint, but more room for Equipment/Category and
@@ -803,7 +813,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
-        f"Additionally, <b>{len(urgent_single)}</b> equipment had a single continuous threshold event exceeding 24 hours and is shown below because of its priority significance. "
+        f"Additionally, <b>{len(urgent_single)}</b> equipment had one continuous threshold event exceeding 24 hours and is shown below because of its priority significance. "
         "This section highlights recurrence frequency, not equipment-failure count or root cause.",
         note
     ))
@@ -879,7 +889,7 @@ if uploaded:
         )
 
         unmapped = sorted(
-            result.loc[result["Category"] == "Other", "Equipment"].dropna().unique().tolist()
+            result.loc[result["Status"] == "N/A", "Equipment"].dropna().unique().tolist()
         )
         if unmapped:
             st.info(
@@ -890,7 +900,8 @@ if uploaded:
         alarms = int((result["Status"] == "ALARM").sum())
         warnings = int((result["Status"] == "WARNING").sum())
         normal = int((result["Status"] == "NORMAL").sum())
-        other_status = max(equipment_count - alarms - warnings - normal, 0)
+        single_status = int((result["Status"] == "SINGLE POINT").sum())
+        na_status = int((result["Status"] == "N/A").sum())
 
         # ------------------------------------------------------------
         # Executive Summary
@@ -910,8 +921,8 @@ if uploaded:
 
         # Status distribution donut.
         status_df = pd.DataFrame({
-            "Status": ["Alarm", "Warning", "Normal", "Other / N/A"],
-            "Count": [alarms, warnings, normal, other_status],
+            "Status": ["Alarm", "Warning", "Normal", "Single Point", "N/A"],
+            "Count": [alarms, warnings, normal, single_status, na_status],
         })
         status_df = status_df[status_df["Count"] > 0]
 
@@ -956,7 +967,7 @@ if uploaded:
                 hovertemplate="%{x}: %{y} equipment<extra></extra>",
                 marker_color=[
                     {"Alarm": "#E84A5F", "Warning": "#FF8A4C",
-                     "Normal": "#4CCB88", "Other / N/A": "#9AA3AD"}[s]
+                     "Normal": "#4CCB88", "Single Point": "#F4D35E", "N/A": "#9AA3AD"}[s]
                     for s in status_df["Status"]
                 ],
             )
@@ -1039,10 +1050,13 @@ if uploaded:
                 f"alarm-duration threshold and should be monitored for recurrence."
             )
 
-        if other_status:
+        if single_status:
             findings.append(
-                f"**{other_status} measurement point(s)** are not classified as "
-                f"Chiller/Freezer and should be mapped after Testo naming is made unique."
+                f"**{single_status} equipment** have threshold observations without an established elapsed duration and are classified as **SINGLE POINT**."
+            )
+        if na_status:
+            findings.append(
+                f"**{na_status} equipment** remain unmapped to a PPHG group and are classified as **N/A**."
             )
 
         if not findings:
@@ -1082,7 +1096,7 @@ if uploaded:
         if selected_status != "All":
             if selected_status == "N/A":
                 filtered_result = filtered_result[
-                    filtered_result["Category"] == "Other"
+                    filtered_result["Status"] == "N/A"
                 ]
             else:
                 filtered_result = filtered_result[
