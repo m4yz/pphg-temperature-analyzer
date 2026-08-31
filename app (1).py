@@ -889,11 +889,21 @@ def build_pdf_report(result, data, median_interval, raw=None):
         note
     ))
 
-    story.append(Spacer(1,4*mm))
+    # Keep the final report note on the Threshold Recurrence page.
+    # The previous 4 mm spacer caused an otherwise unnecessary orphan page.
+    report_note = ParagraphStyle(
+        "ReportNoteCompact",
+        parent=note,
+        fontSize=6.5,
+        leading=7.5,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    story.append(Spacer(1,1.5*mm))
     story.append(Paragraph(
         "<b>Report note:</b> This report is an analytical screening based on uploaded Testo measurement data and the configured PPHG thresholds. "
         "Review findings together with operational records, maintenance history and applicable SOP requirements before formal corrective action or conclusions.",
-        note
+        report_note
     ))
 
     doc.build(story, onFirstPage=_report_footer, onLaterPages=_report_footer)
