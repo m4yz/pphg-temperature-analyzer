@@ -305,100 +305,82 @@ def _report_footer(canvas, doc):
 
 
 def pdf_status_chart(result):
-    """Clean dashboard-matched status distribution donut for PDF."""
-    alarms = int((result["Status"] == "ALARM").sum())
-    warnings = int((result["Status"] == "WARNING").sum())
-    normal = int((result["Status"] == "NORMAL").sum())
-    single = int((result["Status"] == "SINGLE POINT").sum())
-    na = int((result["Status"] == "N/A").sum())
-
-    labels = ["Alarm", "Warning", "Normal", "Single Point", "N/A"]
-    counts = [alarms, warnings, normal, single, na]
-    fills = [
-        colors.HexColor("#E84A5F"),
-        colors.HexColor("#FF8A4C"),
-        colors.HexColor("#4CCB88"),
-        colors.HexColor("#F4D35E"),
-        colors.HexColor("#9AA3AD"),
+    """Status distribution used in the PDF. Zero-count N/A is not displayed."""
+    order = [
+        ("Alarm", "ALARM", "#E84A5F"),
+        ("Warning", "WARNING", "#FF8A4C"),
+        ("Normal", "NORMAL", "#4CCB88"),
+        ("Single Point", "SINGLE POINT", "#F4D35E"),
     ]
-
-    from reportlab.graphics.shapes import String, Rect
+    active = [
+        (label, int((result["Status"] == key).sum()), colors.HexColor(color))
+        for label, key, color in order
+        if int((result["Status"] == key).sum()) > 0
+    ]
     d = Drawing(300, 135)
-
-    # Donut only — no center total, so it cannot collide with the chart.
     pie = Pie()
     pie.x, pie.y, pie.width, pie.height = 12, 8, 112, 112
-    pie.data = counts
-    pie.labels = ["" for _ in counts]
-    pie.slices[0].fillColor = fills[0]
-    for i, fill in enumerate(fills):
+    pie.data = [x[1] for x in active]
+    pie.labels = ["" for _ in active]
+    for i, (_, _, fill) in enumerate(active):
         pie.slices[i].fillColor = fill
         pie.slices[i].strokeColor = colors.white
         pie.slices[i].strokeWidth = 0.7
     d.add(pie)
 
-    # Manual legend: fixed positions prevent ReportLab Legend from
-    # overflowing into the adjacent Status Count chart.
+    from reportlab.graphics.shapes import String, Rect
     y = 103
-    for label, count, fill in zip(labels, counts, fills):
-        if count <= 0:
-            continue
-        d.add(Rect(150, y-3, 9, 9, fillColor=fill, strokeColor=colors.HexColor("#6B7785"), strokeWidth=0.35))
-        d.add(String(166, y, f"{label}  {count}", fontName="Helvetica", fontSize=8,
-                   fillColor=colors.HexColor("#334155")))
+    for label, count, fill in active:
+        d.add(Rect(150, y-3, 9, 9, fillColor=fill,
+                   strokeColor=colors.HexColor("#6B7785"), strokeWidth=0.35))
+        d.add(String(166, y, f"{label}  {count}",
+                     fontName="Helvetica", fontSize=8,
+                     fillColor=colors.HexColor("#334155")))
         y -= 22
     return d
 
 def pdf_status_count_chart(alarm_df):
-    """Dashboard-matched Status Count bar chart."""
+    """Status count chart used in the PDF. N/A is intentionally omitted."""
     result = _CURRENT_RESULT_FOR_PDF
-    alarms = int((result["Status"] == "ALARM").sum())
-    warnings = int((result["Status"] == "WARNING").sum())
-    normal = int((result["Status"] == "NORMAL").sum())
-    equipment_count = len(result)
-    single = int((result["Status"] == "SINGLE POINT").sum())
-    na = int((result["Status"] == "N/A").sum())
-
-    labels = ["Alarm", "Warning", "Normal", "Single Point", "N/A"]
-    counts = [alarms, warnings, normal, single, na]
-    fills = [
-        colors.HexColor("#E84A5F"),
-        colors.HexColor("#FF8A4C"),
-        colors.HexColor("#4CCB88"),
-        colors.HexColor("#F4D35E"),
-        colors.HexColor("#9AA3AD"),
+    order = [
+        ("Alarm", "ALARM", "#E84A5F"),
+        ("Warning", "WARNING", "#FF8A4C"),
+        ("Normal", "NORMAL", "#4CCB88"),
+        ("Single Point", "SINGLE POINT", "#F4D35E"),
+    ]
+    active = [
+        (label, int((result["Status"] == key).sum()), colors.HexColor(color))
+        for label, key, color in order
+        if int((result["Status"] == key).sum()) > 0
     ]
 
     from reportlab.graphics.shapes import String, Rect, Line
     d = Drawing(405, 135)
     left, right = 44, 390
     bottom, top = 20, 110
-    grid_max = max(10, ((max(counts) + 1) // 2) * 2)
+    max_count = max([x[1] for x in active] or [1])
+    grid_max = max(10, ((max_count + 1) // 2) * 2)
 
     for tick in range(0, grid_max + 1, 2):
-        y = bottom + (top - bottom) * tick / grid_max
+        y = bottom + (top-bottom) * tick / grid_max
         d.add(Line(left, y, right, y,
-                   strokeColor=colors.HexColor("#DDE3E8"),
-                   strokeWidth=0.45))
-        d.add(String(left - 6, y - 2.5, str(tick),
+                   strokeColor=colors.HexColor("#DDE3E8"), strokeWidth=0.45))
+        d.add(String(left-6, y-2.5, str(tick),
                      fontName="Helvetica", fontSize=6.5,
                      textAnchor="end", fillColor=colors.HexColor("#667481")))
 
-    slot = (right - left) / len(labels)
-    bar_w = min(48, slot * 0.62)
-    for i, (label, count, fill) in enumerate(zip(labels, counts, fills)):
-        cx = left + slot * (i + 0.5)
-        h = (top - bottom) * count / grid_max
-        x = cx - bar_w / 2
-        d.add(Rect(x, bottom, bar_w, h,
-                   fillColor=fill, strokeColor=None))
-        d.add(String(cx, bottom + h + 5, str(count),
+    slot = (right-left) / max(1, len(active))
+    bar_w = min(52, slot*0.62)
+    for i, (label, count, fill) in enumerate(active):
+        cx = left + slot*(i+0.5)
+        h = (top-bottom)*count/grid_max
+        d.add(Rect(cx-bar_w/2, bottom, bar_w, h, fillColor=fill, strokeColor=None))
+        d.add(String(cx, bottom+h+5, str(count),
                      fontName="Helvetica", fontSize=7.2,
                      textAnchor="middle", fillColor=colors.HexColor("#667481")))
         d.add(String(cx, 7, label,
                      fontName="Helvetica", fontSize=6.8,
                      textAnchor="middle", fillColor=colors.HexColor("#667481")))
-
     return d
 
 def build_pdf_report(result, data, median_interval, raw=None):
@@ -499,7 +481,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         "KPICardText",
         parent=body,
         fontSize=8.2,
-        leading=19,
+        leading=16,
         spaceAfter=0,
         spaceBefore=0,
     )
@@ -510,7 +492,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", kpi_text),
         Paragraph(f"<b>Single Point</b><br/><font size=17 color='#B38B00'>{single}</font>", kpi_text),
     ]
-    kpi = Table([kpi_cells], colWidths=[53.4*mm]*5, rowHeights=[20*mm])
+    kpi = Table([kpi_cells], colWidths=[53.4*mm]*5, rowHeights=[16.5*mm])
     kpi.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F3F7FA")),
         ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0F0")),
@@ -528,7 +510,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ]))
     story.append(kpi)
     story.append(Paragraph(
-        "<b>Single Point</b> = threshold observed but no elapsed duration can be established. <b>N/A</b> = equipment could not be mapped to a PPHG group.",
+        "<b>Single Point</b> = threshold observed but no elapsed duration can be established.",
         note
     ))
     story.append(Spacer(1,4*mm))
@@ -550,7 +532,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(chart_labels)
 
     charts = Table([[pdf_status_chart(result), pdf_status_count_chart(alarm_df)]],
-                   colWidths=[133.5*mm,133.5*mm], rowHeights=[49*mm])
+                   colWidths=[133.5*mm,133.5*mm], rowHeights=[43*mm])
     charts.setStyle(TableStyle([
         ("BOX",(0,0),(-1,-1),0.45,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -580,7 +562,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ALIGN",(0,1),(0,-1),"CENTER"),("ALIGN",(2,1),(-1,-1),"CENTER"),
-        ("TOPPADDING",(0,0),(-1,-1),2.2),("BOTTOMPADDING",(0,0),(-1,-1),2.2),
+        ("TOPPADDING",(0,0),(-1,-1),1.7),("BOTTOMPADDING",(0,0),(-1,-1),1.7),
     ]))
     for i, (_, r) in enumerate(urgent_over24.iterrows(), 1):
         if r["Longest Continuous"] > pd.Timedelta(hours=24):
@@ -603,12 +585,6 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(ct)
-    story.append(Paragraph(
-        "Longest Continuous uses consecutive samples at or above the applicable threshold; sampling gaps are not treated as continuous. "
-        "Exceeded By is the portion beyond the applicable PPHG delay.",
-        note
-    ))
-
     # PAGE 2 — Equipment Analysis
     story.append(PageBreak())
     story.append(Paragraph("2. Equipment Analysis", title))
@@ -813,55 +789,78 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
-        f"Additionally, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours; "
-        f"<b>{len(urgent_single)}</b> of these were single-event exceptions. "
-        "This section highlights recurrence frequency, not equipment-failure count or root cause.",
+        f"Separately, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours; "
+        f"<b>{len(urgent_single)}</b> of these had only one threshold event. "
+        "Recurrence frequency and prolonged excursions are shown separately.",
         note
     ))
-    recurrence_rows = []
-    if not repeat.empty:
-        recurrence_rows.extend([(idx, r) for idx, r in repeat.iterrows()])
-    if not urgent_single.empty:
-        recurrence_rows.extend([(idx, r) for idx, r in urgent_single.iterrows()])
 
-    if not recurrence_rows:
-        story.append(Paragraph("No repeated threshold events or >24h single-event exceptions were detected.", body))
-    else:
+    if not repeat.empty:
+        story.append(Paragraph("Repeated Threshold Events", h2))
         rd = [["Equipment", "Category", "Threshold Events", "Longest Event", "Status"]]
-        for _, r in recurrence_rows:
+        for _, r in repeat.iterrows():
             rd.append([
                 Paragraph(str(r["Equipment"]), tiny),
                 str(r["Category"]),
                 str(int(r["Threshold Events"])),
                 format_duration(r["Longest Continuous"]),
-                "URGENT >24h" if r["Longest Continuous"] > pd.Timedelta(hours=24)
-                else str(r["Status"])
+                str(r["Status"]),
             ])
-        rt = Table(rd, colWidths=[88*mm,25*mm,34*mm,42*mm,40*mm], repeatRows=1)
+        rt = Table(
+            rd,
+            colWidths=[105*mm,25*mm,28*mm,35*mm,36*mm],
+            repeatRows=1
+        )
         rt.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EAF2F8")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#17324D")),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
             ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),7),
+            ("FONTSIZE",(0,0),(-1,-1),6.6),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("ALIGN",(1,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),3.5),
-            ("BOTTOMPADDING",(0,0),(-1,-1),3.5),
+            ("TOPPADDING",(0,0),(-1,-1),1.6),
+            ("BOTTOMPADDING",(0,0),(-1,-1),1.6),
         ]))
-        for i, (_, r) in enumerate(recurrence_rows,1):
-            if r["Longest Continuous"] > pd.Timedelta(hours=24):
-                rt.setStyle(TableStyle([
-                    ("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0"))
-                ]))
         story.append(rt)
-        story.append(Spacer(1,3*mm))
-        story.append(Paragraph(
-            "<b>How to read this:</b> A threshold event is one distinct period where the measured temperature is at or above the applicable PPHG threshold. "
-            "A high event count indicates frequent threshold crossing; it does <b>not</b> mean the equipment failed that many times. "
-            "Event count should be interpreted together with Longest Continuous, Peak temperature and operating records.",
-            note
-        ))
+
+    if not urgent_single.empty:
+        story.append(Spacer(1,2.5*mm))
+        story.append(Paragraph("Urgent >24h — Single-Event Exceptions", h2))
+        ud = [["Equipment", "Category", "Longest Event", "Exceeded By", "Peak °C"]]
+        for _, r in urgent_single.iterrows():
+            ud.append([
+                Paragraph(str(r["Equipment"]), tiny),
+                str(r["Category"]),
+                format_duration(r["Longest Continuous"]),
+                format_duration(r["Exceeded By"]),
+                f"{r['Peak During Excursion °C']:.1f}",
+            ])
+        ut = Table(
+            ud,
+            colWidths=[105*mm,25*mm,35*mm,35*mm,29*mm],
+            repeatRows=1
+        )
+        ut.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF0F0")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#B00020")),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
+            ("FONTSIZE",(0,0),(-1,-1),6.8),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("ALIGN",(1,1),(-1,-1),"CENTER"),
+            ("TOPPADDING",(0,0),(-1,-1),2),
+            ("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ]))
+        story.append(ut)
+
+    story.append(Spacer(1,2.5*mm))
+    story.append(Paragraph(
+        "<b>How to read this:</b> A threshold event is one distinct period where the measured temperature is at or above the applicable PPHG threshold. "
+        "A high event count indicates frequent threshold crossing; it does <b>not</b> mean the equipment failed that many times. "
+        "Event count should be interpreted together with Longest Continuous, Peak temperature and operating records.",
+        note
+    ))
 
     story.append(Spacer(1,4*mm))
     story.append(Paragraph(
@@ -912,18 +911,19 @@ if uploaded:
             "Overview of equipment status based on PPHG temperature threshold-event analysis."
         )
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Equipment", equipment_count)
         c2.metric("🔴 Alarm", alarms)
         c3.metric("🟠 Warning", warnings)
         c4.metric("🟢 Normal", normal)
+        c5.metric("🟡 Single Point", single_status)
 
         chart_left, chart_right = st.columns(2)
 
         # Status distribution donut.
         status_df = pd.DataFrame({
-            "Status": ["Alarm", "Warning", "Normal", "Single Point", "N/A"],
-            "Count": [alarms, warnings, normal, single_status, na_status],
+            "Status": ["Alarm", "Warning", "Normal", "Single Point"],
+            "Count": [alarms, warnings, normal, single_status],
         })
         status_df = status_df[status_df["Count"] > 0]
 
@@ -1059,11 +1059,6 @@ if uploaded:
             findings.append(
                 f"**{single_status} equipment** have threshold observations without an established elapsed duration and are classified as **SINGLE POINT**."
             )
-        if na_status:
-            findings.append(
-                f"**{na_status} equipment** remain unmapped to a PPHG group and are classified as **N/A**."
-            )
-
         if not findings:
             findings.append("No PPHG Chiller/Freezer alarm-duration threshold events were identified.")
 
@@ -1079,7 +1074,7 @@ if uploaded:
         # Keep the UI simple: filter by the two PPHG groups only.
         # Detailed equipment type remains visible in the Category column.
         category_options = ["All", "Chiller", "Freezer"]
-        status_options = ["All", "ALARM", "WARNING", "NORMAL", "SINGLE POINT", "N/A"]
+        status_options = ["All", "ALARM", "WARNING", "NORMAL", "SINGLE POINT"]
 
         selected_category = f1.selectbox(
             "Filter by category",
@@ -1099,14 +1094,9 @@ if uploaded:
                 filtered_result["PPHG Group"] == selected_category
             ]
         if selected_status != "All":
-            if selected_status == "N/A":
-                filtered_result = filtered_result[
-                    filtered_result["Status"] == "N/A"
-                ]
-            else:
-                filtered_result = filtered_result[
-                    filtered_result["Status"] == selected_status
-                ]
+            filtered_result = filtered_result[
+                filtered_result["Status"] == selected_status
+            ]
 
         st.caption(
             f"Showing **{len(filtered_result)} of {len(result)} equipment**."
