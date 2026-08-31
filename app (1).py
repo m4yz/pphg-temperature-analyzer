@@ -834,36 +834,6 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ]))
         story.append(rt)
 
-    if not urgent_single.empty:
-        story.append(Spacer(1,2.5*mm))
-        story.append(Paragraph("Urgent >24h — Single-Event Exceptions", h2))
-        ud = [["Equipment", "Category", "Longest Event", "Exceeded By", "Peak °C"]]
-        for _, r in urgent_single.iterrows():
-            ud.append([
-                Paragraph(str(r["Equipment"]), tiny),
-                Paragraph(str(r["Category"]), category_style),
-                format_duration(r["Longest Continuous"]),
-                format_duration(r["Exceeded By"]),
-                f"{r['Peak During Excursion °C']:.1f}",
-            ])
-        ut = Table(
-            ud,
-            colWidths=[101*mm,29*mm,35*mm,35*mm,29*mm],
-            repeatRows=1
-        )
-        ut.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF0F0")),
-            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#B00020")),
-            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),6.8),
-            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("ALIGN",(1,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),2),
-            ("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ]))
-        story.append(ut)
-
     story.append(Spacer(1,2.5*mm))
     story.append(Paragraph(
         "<b>How to read this:</b> A threshold event is one distinct period where the measured temperature is at or above the applicable PPHG threshold. "
