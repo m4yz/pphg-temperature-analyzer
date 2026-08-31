@@ -36,8 +36,10 @@ EQUIPMENT_CODE_CATEGORY = {
     "UPC": ("Upright Chiller", "Chiller"),
     "UPCS": ("Upright Chiller Showcase", "Chiller"),
     "UDC": ("Under Counter Chiller", "Chiller"),
+    "UCC": ("Under Counter Chiller", "Chiller"),
     "WCH": ("Wine Chiller", "Chiller"),
     "SCH": ("Showcase Chiller", "Chiller"),
+    "SHC": ("Showcase Chiller", "Chiller"),
     "CHS": ("Showcase Chiller", "Chiller"),
     "UPF": ("Upright Freezer", "Freezer"),
     "UCF": ("Under Counter Freezer", "Freezer"),
@@ -881,7 +883,7 @@ if uploaded:
         )
         if unmapped:
             st.info(
-                f"{len(unmapped)} equipment belum memiliki mapping kategori dan "
+                f"{len(unmapped)} equipment memiliki kode kategori yang belum dikenal: "
                 "tetap dianalisis sebagai Other/N/A: " + ", ".join(unmapped)
             )
 
