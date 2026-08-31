@@ -235,7 +235,22 @@ def analyze(df):
     for equipment, g in df.groupby("Equipment", sort=False):
         category = g["Category"].iloc[0]
         pphg_group = g["PPHG Group"].iloc[0] if "PPHG Group" in g.columns else category
-        stats = excursion_stats(g, pphg_group, median_interval)
+
+        # Testo measurement points can have different sampling cadences.
+        # Continuity must therefore use this equipment's own cadence rather
+        # than the global median, otherwise a valid WCH/UDC/etc. sequence can
+        # be incorrectly split into hundreds of single-point events.
+        local_deltas = (
+            g["Timestamp"].sort_values().diff().dropna()
+        )
+        local_deltas = local_deltas[local_deltas > pd.Timedelta(0)]
+        local_interval = (
+            local_deltas.median()
+            if not local_deltas.empty
+            else median_interval
+        )
+
+        stats = excursion_stats(g, pphg_group, local_interval)
 
         if pphg_group in RULES:
             rule = RULES[pphg_group]
@@ -1040,9 +1055,9 @@ if uploaded:
         # Keep the analysis filters here. They do not affect the Executive Summary;
         # they only control which rows are shown in the detailed analysis table.
         f1, f2 = st.columns(2)
-        category_options = ["All"] + sorted(
-            result["Category"].dropna().unique().tolist()
-        )
+        # Keep the UI simple: filter by the two PPHG groups only.
+        # Detailed equipment type remains visible in the Category column.
+        category_options = ["All", "Chiller", "Freezer"]
         status_options = ["All", "ALARM", "WARNING", "NORMAL", "SINGLE POINT", "N/A"]
 
         selected_category = f1.selectbox(
@@ -1055,11 +1070,12 @@ if uploaded:
             status_options,
             key="analysis_status_filter",
         )
+        st.caption("Category filter: Chiller / Freezer. Detailed equipment type remains shown in the Category column.")
 
         filtered_result = result.copy()
         if selected_category != "All":
             filtered_result = filtered_result[
-                filtered_result["Category"] == selected_category
+                filtered_result["PPHG Group"] == selected_category
             ]
         if selected_status != "All":
             if selected_status == "N/A":
