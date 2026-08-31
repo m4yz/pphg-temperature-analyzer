@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 # FINAL REPORT LAYOUT REVISION: compact management tables; interpretation notes below tables.
 import pandas as pd
