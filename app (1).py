@@ -456,7 +456,15 @@ def build_pdf_report(result, data, median_interval, raw=None):
     single_df = result[result["Status"] == "SINGLE POINT"].copy()
     repeat = result[result["Threshold Events"] >= 2].sort_values(
         ["Threshold Events", "Longest Continuous"], ascending=[False, False]
-    )
+    ).copy()
+    # A single threshold event can still be operationally critical when it
+    # remains continuous for >24h. Keep recurrence definition intact, but
+    # surface these urgent single-event exceptions in the recurrence page.
+    urgent_single = result[
+        (result["Status"] == "ALARM")
+        & (result["Longest Continuous"] > pd.Timedelta(hours=24))
+        & (result["Threshold Events"] < 2)
+    ].sort_values("Longest Continuous", ascending=False).copy()
 
     story = []
 
@@ -745,14 +753,21 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
+        f"Additionally, <b>{len(urgent_single)}</b> equipment had a single continuous threshold event exceeding 24 hours and is shown below because of its priority significance. "
         "This section highlights recurrence frequency, not equipment-failure count or root cause.",
         note
     ))
-    if repeat.empty:
-        story.append(Paragraph("No repeated threshold events were detected.", body))
+    recurrence_rows = []
+    if not repeat.empty:
+        recurrence_rows.extend([(idx, r) for idx, r in repeat.iterrows()])
+    if not urgent_single.empty:
+        recurrence_rows.extend([(idx, r) for idx, r in urgent_single.iterrows()])
+
+    if not recurrence_rows:
+        story.append(Paragraph("No repeated threshold events or >24h single-event exceptions were detected.", body))
     else:
         rd = [["Equipment", "Category", "Threshold Events", "Longest Event", "Status"]]
-        for _, r in repeat.iterrows():
+        for _, r in recurrence_rows:
             rd.append([
                 Paragraph(str(r["Equipment"]), tiny),
                 str(r["Category"]),
@@ -773,7 +788,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
             ("TOPPADDING",(0,0),(-1,-1),3.5),
             ("BOTTOMPADDING",(0,0),(-1,-1),3.5),
         ]))
-        for i, (_, r) in enumerate(repeat.iterrows(),1):
+        for i, (_, r) in enumerate(recurrence_rows,1):
             if r["Longest Continuous"] > pd.Timedelta(hours=24):
                 rt.setStyle(TableStyle([
                     ("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0"))
@@ -909,10 +924,21 @@ if uploaded:
 
         # Threshold-event recurrence: useful as a pattern indicator, not a failure count.
         repeated_df = result[result["Threshold Events"] >= 2].copy()
+        urgent_single_df = result[
+            (result["Status"] == "ALARM")
+            & (result["Longest Continuous"] > pd.Timedelta(hours=24))
+            & (result["Threshold Events"] < 2)
+        ].copy()
         st.markdown("**Threshold Recurrence**")
-        a1, a2 = st.columns(2)
+        a1, a2, a3 = st.columns(3)
         a1.metric("Units with Repeated Events", len(repeated_df))
-        a2.metric("Total Threshold Events", int(result["Threshold Events"].sum()))
+        a2.metric("Urgent >24h Single Event", len(urgent_single_df))
+        a3.metric("Total Threshold Events", int(result["Threshold Events"].sum()))
+        if not urgent_single_df.empty:
+            st.info(
+                "Urgent >24h units with only one threshold event are shown separately because "
+                "a single prolonged event is a priority condition, not a recurrence pattern."
+            )
 
         if not repeated_df.empty:
             top_repeat = repeated_df.sort_values(
