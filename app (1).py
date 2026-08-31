@@ -470,14 +470,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
     repeat = result[result["Threshold Events"] >= 2].sort_values(
         ["Threshold Events", "Longest Continuous"], ascending=[False, False]
     ).copy()
-    # A single threshold event can still be operationally critical when it
-    # remains continuous for >24h. Keep recurrence definition intact, but
-    # surface these urgent single-event exceptions in the recurrence page.
-    urgent_single = result[
+    # Any ALARM with a continuous event >24h is an urgent priority unit.
+    # Keep recurrence definition intact, while separately identifying the
+    # subset whose urgent condition comes from a single threshold event.
+    urgent_over24 = result[
         (result["Status"] == "ALARM")
         & (result["Longest Continuous"] > pd.Timedelta(hours=24))
-        & (result["Threshold Events"] < 2)
     ].sort_values("Longest Continuous", ascending=False).copy()
+    urgent_single = urgent_over24[urgent_over24["Threshold Events"] < 2].copy()
 
     story = []
 
@@ -561,9 +561,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(charts)
     story.append(Spacer(1,3*mm))
 
-    story.append(Paragraph("Priority Overview", h2))
+    story.append(Paragraph("Priority Overview — Continuous Excursions >24h", h2))
     priority_rows = [["Rank","Equipment","Status","Continuous","Exceeded By","Peak °C"]]
-    for rank, (_, r) in enumerate(alarm_df.head(5).iterrows(), 1):
+    for rank, (_, r) in enumerate(urgent_over24.iterrows(), 1):
         priority_rows.append([
             str(rank), Paragraph(str(r["Equipment"]), small),
             "URGENT >24h" if r["Longest Continuous"] > pd.Timedelta(hours=24) else "REVIEW",
@@ -580,9 +580,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ALIGN",(0,1),(0,-1),"CENTER"),("ALIGN",(2,1),(-1,-1),"CENTER"),
-        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),2.2),("BOTTOMPADDING",(0,0),(-1,-1),2.2),
     ]))
-    for i, (_, r) in enumerate(alarm_df.head(5).iterrows(), 1):
+    for i, (_, r) in enumerate(urgent_over24.iterrows(), 1):
         if r["Longest Continuous"] > pd.Timedelta(hours=24):
             pt.setStyle(TableStyle([("BACKGROUND",(0,i),(-1,i),colors.HexColor("#FFF0F0"))]))
     story.append(pt)
@@ -813,7 +813,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
-        f"Additionally, <b>{len(urgent_single)}</b> equipment had one continuous threshold event exceeding 24 hours and is shown below because of its priority significance. "
+        f"Additionally, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours; "
+        f"<b>{len(urgent_single)}</b> of these were single-event exceptions. "
         "This section highlights recurrence frequency, not equipment-failure count or root cause.",
         note
     ))
@@ -992,13 +993,17 @@ if uploaded:
         ].copy()
         st.markdown("**Threshold Recurrence**")
         a1, a2, a3 = st.columns(3)
+        urgent_over24_df = result[
+            (result["Status"] == "ALARM")
+            & (result["Longest Continuous"] > pd.Timedelta(hours=24))
+        ].copy()
         a1.metric("Units with Repeated Events", len(repeated_df))
-        a2.metric("Urgent >24h Single Event", len(urgent_single_df))
+        a2.metric("Urgent >24h", len(urgent_over24_df))
         a3.metric("Total Threshold Events", int(result["Threshold Events"].sum()))
         if not urgent_single_df.empty:
             st.info(
-                "Urgent >24h units with only one threshold event are shown separately because "
-                "a single prolonged event is a priority condition, not a recurrence pattern."
+                f"**{len(urgent_single_df)} of {len(urgent_over24_df)} urgent >24h units** have only one threshold event. "
+                "A single prolonged event is a priority condition, not a recurrence pattern."
             )
 
         if not repeated_df.empty:
