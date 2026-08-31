@@ -27,49 +27,36 @@ RULES = {
     "Freezer": {"limit": -15.0, "delay": pd.Timedelta(hours=4)},
 }
 
-# Category mapping is name-based, not position-based.
-# The uploaded CSV determines which equipment exists. This dictionary only
-# assigns a PPHG category when the equipment name is known.
-EQUIPMENT_CATEGORY_MAP = {
-    "Eden Bar": "Chiller",
-    "RL Kitchen – Showcase Chiller": "Chiller",
-    "RL Kitchen – Upright Chiller 1": "Chiller",
-    "RL Kitchen – Upright Chiller 2": "Chiller",
-    "RL Kitchen – Upright Chiller 3": "Chiller",
-    "RL Kitchen – Upright Freezer (2 Drawer)": "Freezer",
-    "RL Kitchen – Undercounter Chiller": "Chiller",
-    "RL Kitchen – Upright Chiller (2 Drawer)": "Chiller",
-    "RL Kitchen – Freezer GEA 1": "Freezer",
-    "RL Kitchen – Freezer GEA 3": "Freezer",
-    "RL Kitchen – Freezer GEA 2": "Freezer",
-    "Receiving – Freezer GEA 013": "Freezer",
-    "Receiving – Freezer GEA 012": "Freezer",
-    "Receiving – Freezer GEA 015": "Freezer",
-    "Receiving – Showcase Chiller 014": "Chiller",
-    "Kitchen 1 L90 – Upright Chiller 1 019": "Chiller",
-    "Kitchen 1 L90 – Upright Chiller 2 020": "Chiller",
-    "Kitchen 1 L90 – Upright Chiller 3 021": "Chiller",
-    "Kitchen 1 L90 – Upright Freezer 1 022": "Freezer",
-    "Canteen – Chiller": "Chiller",
-    "Kitchen Lt.90 – K.UPCS.1": "Chiller",
-    "Kitchen Lt.90 – WCH.1": "Chiller",
-    "Kitchen Lt.90 – WCH.2": "Chiller",
-    "Eden Bar – Chiller": "Chiller",
+# Equipment category is detected from the equipment code in its name.
+# The uploaded CSV determines which equipment exists; no fixed equipment list
+# is required. Display Category is specific, while PPHG Group drives the
+# Chiller/Freezer threshold rule.
+EQUIPMENT_CODE_CATEGORY = {
+    "UPC": ("Upright Chiller", "Chiller"),
+    "UDC": ("Under Counter Chiller", "Chiller"),
+    "WCH": ("Wine Chiller", "Chiller"),
+    "SCH": ("Showcase Chiller", "Chiller"),
+    "CHS": ("Showcase Chiller", "Chiller"),
+    "UPF": ("Upright Freezer", "Freezer"),
+    "UCF": ("Under Counter Freezer", "Freezer"),
+    "BTC": ("Bottle Chiller", "Chiller"),
 }
 
 def category_from_name(name):
-    """Resolve PPHG category from the actual CSV equipment name."""
+    """Resolve display category + PPHG group from an equipment code."""
     name = str(name).strip()
-    if name in EQUIPMENT_CATEGORY_MAP:
-        return EQUIPMENT_CATEGORY_MAP[name]
+    for code, (display_category, pphg_group) in EQUIPMENT_CODE_CATEGORY.items():
+        if re.search(rf"(^|[._\-\s]){re.escape(code)}([._\-\s]|$)", name, re.IGNORECASE):
+            return display_category, pphg_group
 
+    # Compatibility fallback for older exports without the standardized code.
     low = name.lower()
     if "freezer" in low:
-        return "Freezer"
+        return "Freezer", "Freezer"
     if "chiller" in low:
-        return "Chiller"
+        return "Chiller", "Chiller"
 
-    return "Other"
+    return "Other", "Other"
 
 def format_duration(td):
     if pd.isna(td):
@@ -208,13 +195,14 @@ def parse_testo(uploaded_files):
                 continue
 
             equipment_name = str(col).split(": Temperature")[0].strip()
-            category = category_from_name(equipment_name)
+            category, pphg_group = category_from_name(equipment_name)
 
             records.append(pd.DataFrame({
                 "Timestamp": timestamps[mask].values,
                 "Equipment": equipment_name,
                 "Temperature": values[mask].values,
                 "Category": category,
+                "PPHG Group": pphg_group,
                 "Source File": getattr(uploaded, "name", "Testo CSV"),
             }))
 
@@ -244,10 +232,11 @@ def analyze(df):
 
     for equipment, g in df.groupby("Equipment", sort=False):
         category = g["Category"].iloc[0]
-        stats = excursion_stats(g, category, median_interval)
+        pphg_group = g["PPHG Group"].iloc[0] if "PPHG Group" in g.columns else category
+        stats = excursion_stats(g, pphg_group, median_interval)
 
-        if category in RULES:
-            rule = RULES[category]
+        if pphg_group in RULES:
+            rule = RULES[pphg_group]
             exceeded = max(stats["duration"] - rule["delay"], pd.Timedelta(0))
             limit_text = f"≥{rule['limit']:g}°C / {rule['delay'].total_seconds()/3600:g}h"
         else:
@@ -257,6 +246,7 @@ def analyze(df):
         rows.append({
             "Equipment": equipment,
             "Category": category,
+            "PPHG Group": pphg_group,
             "Min °C": g["Temperature"].min(),
             "Average °C": g["Temperature"].mean(),
             "Max °C": g["Temperature"].max(),
