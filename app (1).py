@@ -596,23 +596,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ]))
     story.append(ct)
     # PAGE 2 — Equipment Analysis
+    # Split the full equipment analysis into two clean PPHG groups.
+    # Each group gets its own page so the long equipment/category labels have
+    # room to wrap without making the table visually crowded.
     story.append(PageBreak())
-    story.append(Paragraph("2. Equipment Analysis", title))
-    story.append(Paragraph(
-        f"<b>{len(result)} equipment</b> • Sorted by status and longest continuous threshold event. "
-        "Status colors are applied only to the final column for quick scanning.",
-        note
-    ))
-    story.append(Paragraph(
-        "<b>Reading guide:</b> Continuous = longest threshold event. "
-        "Exceeded = time beyond the applicable PPHG delay. "
-        "Threshold Events = number of distinct periods detected at or above the applicable PPHG threshold. This is a recurrence indicator, not a failure count.",
-        note
-    ))
-    story.append(Spacer(1,1.5*mm))
 
-    # Keep long equipment/category names readable. Paragraphs allow safe
-    # wrapping instead of text colliding with adjacent columns.
     header_style = ParagraphStyle(
         "EquipmentTableHeader",
         parent=tiny,
@@ -631,66 +619,126 @@ def build_pdf_report(result, data, median_interval, raw=None):
         spaceBefore=0,
     )
 
-    headers = [
-        Paragraph("Equipment", header_style),
-        Paragraph("Category", header_style),
-        Paragraph("Min °C", header_style),
-        Paragraph("Avg °C", header_style),
-        Paragraph("Max °C", header_style),
-        Paragraph("Start", header_style),
-        Paragraph("End", header_style),
-        Paragraph("Continuous", header_style),
-        Paragraph("Exceeded", header_style),
-        Paragraph("Threshold<br/>Events", header_style),
-        Paragraph("Status", header_style),
-    ]
-    rows = [headers]
-    for _, r in result.iterrows():
-        start = r["Longest Start"].strftime("%d-%m %H:%M") if pd.notna(r["Longest Start"]) else "—"
-        end = r["Longest End"].strftime("%d-%m %H:%M") if pd.notna(r["Longest End"]) else "—"
-        rows.append([
-            Paragraph(str(r["Equipment"]), cell_style),
-            Paragraph(str(r["Category"]), cell_style),
-            f"{r['Min °C']:.1f}", f"{r['Average °C']:.1f}", f"{r['Max °C']:.1f}",
-            start, end, format_duration(r["Longest Continuous"]),
-            format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
-            str(int(r["Threshold Events"])),
-            str(r["Status"])
-        ])
+    def build_equipment_analysis_table(group_df):
+        headers = [
+            Paragraph("Equipment", header_style),
+            Paragraph("Category", header_style),
+            Paragraph("Min °C", header_style),
+            Paragraph("Avg °C", header_style),
+            Paragraph("Max °C", header_style),
+            Paragraph("Start", header_style),
+            Paragraph("End", header_style),
+            Paragraph("Continuous", header_style),
+            Paragraph("Exceeded", header_style),
+            Paragraph("Threshold<br/>Events", header_style),
+            Paragraph("Status", header_style),
+        ]
+        rows = [headers]
 
-    # Same overall table footprint, but more room for Equipment/Category and
-    # enough width for time columns. Long labels wrap within their own cell.
-    at = Table(
-        rows,
-        colWidths=[
-            62*mm, 27*mm, 12*mm, 12*mm, 12*mm,
-            21*mm, 21*mm, 25*mm, 23*mm, 19*mm, 18*mm
-        ],
-        repeatRows=1,
-    )
-    cmd = [
-        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
-        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,1),(-1,-1),6.8),
-        ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"CENTER"),
-        ("TOPPADDING",(0,0),(-1,-1),2.0),("BOTTOMPADDING",(0,0),(-1,-1),2.0),
-    ]
-    for i, (_, r) in enumerate(result.iterrows(), 1):
-        status = r["Status"]
-        if status == "ALARM":
-            cmd += [("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFD8D8")),
-                    ("TEXTCOLOR",(-1,i),(-1,i),colors.HexColor("#B00020")),
-                    ("FONTNAME",(-1,i),(-1,i),"Helvetica-Bold")]
-        elif status == "WARNING":
-            cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFF0CC")))
-        elif status == "NORMAL":
-            cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#D9F5E5")))
-        elif status == "SINGLE POINT":
-            cmd.append(("BACKGROUND",(-1,i),(-1,i),colors.HexColor("#FFF7D6")))
-    at.setStyle(TableStyle(cmd))
-    story.append(at)
+        for _, r in group_df.iterrows():
+            start_dt = (
+                r["Longest Start"].strftime("%d-%m %H:%M")
+                if pd.notna(r["Longest Start"]) else "—"
+            )
+            end_dt = (
+                r["Longest End"].strftime("%d-%m %H:%M")
+                if pd.notna(r["Longest End"]) else "—"
+            )
+            rows.append([
+                Paragraph(str(r["Equipment"]), cell_style),
+                Paragraph(str(r["Category"]), cell_style),
+                f"{r['Min °C']:.1f}",
+                f"{r['Average °C']:.1f}",
+                f"{r['Max °C']:.1f}",
+                start_dt,
+                end_dt,
+                format_duration(r["Longest Continuous"]),
+                format_duration(r["Exceeded By"])
+                if r["Exceeded By"] > pd.Timedelta(0) else "—",
+                str(int(r["Threshold Events"])),
+                str(r["Status"]),
+            ])
+
+        table = Table(
+            rows,
+            colWidths=[
+                62*mm, 27*mm, 12*mm, 12*mm, 12*mm,
+                21*mm, 21*mm, 25*mm, 23*mm, 19*mm, 18*mm
+            ],
+            repeatRows=1,
+        )
+
+        style_cmd = [
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("FONTSIZE",(0,1),(-1,-1),6.8),
+            ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("ALIGN",(2,1),(-1,-1),"CENTER"),
+            ("TOPPADDING",(0,0),(-1,-1),2.0),
+            ("BOTTOMPADDING",(0,0),(-1,-1),2.0),
+        ]
+
+        for row_idx, (_, r) in enumerate(group_df.iterrows(), 1):
+            status = r["Status"]
+            if status == "ALARM":
+                style_cmd += [
+                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#FFD8D8")),
+                    ("TEXTCOLOR",(-1,row_idx),(-1,row_idx),colors.HexColor("#B00020")),
+                    ("FONTNAME",(-1,row_idx),(-1,row_idx),"Helvetica-Bold"),
+                ]
+            elif status == "WARNING":
+                style_cmd.append(
+                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#FFF0CC"))
+                )
+            elif status == "NORMAL":
+                style_cmd.append(
+                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#D9F5E5"))
+                )
+            elif status == "SINGLE POINT":
+                style_cmd.append(
+                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#FFF7D6"))
+                )
+
+        table.setStyle(TableStyle(style_cmd))
+        return table
+
+    chiller_df = result[result["PPHG Group"] == "Chiller"].copy()
+    freezer_df = result[result["PPHG Group"] == "Freezer"].copy()
+
+    # --- Chiller group ---
+    story.append(Paragraph("2. Equipment Analysis — Chiller", title))
+    story.append(Paragraph(
+        f"<b>{len(chiller_df)} Chiller equipment</b> • Sorted by status and longest continuous threshold event.",
+        note
+    ))
+    story.append(Paragraph(
+        "<b>Reading guide:</b> Continuous = longest threshold event. "
+        "Exceeded = time beyond the applicable PPHG delay. "
+        "Threshold Events = number of distinct periods detected at or above the applicable PPHG threshold. "
+        "This is a recurrence indicator, not a failure count.",
+        note
+    ))
+    story.append(Spacer(1,1.5*mm))
+    story.append(build_equipment_analysis_table(chiller_df))
+
+    # --- Freezer group on a clean page ---
+    story.append(PageBreak())
+    story.append(Paragraph("2. Equipment Analysis — Freezer", title))
+    story.append(Paragraph(
+        f"<b>{len(freezer_df)} Freezer equipment</b> • Sorted by status and longest continuous threshold event.",
+        note
+    ))
+    story.append(Paragraph(
+        "<b>Reading guide:</b> Continuous = longest threshold event. "
+        "Exceeded = time beyond the applicable PPHG delay. "
+        "Threshold Events = number of distinct periods detected at or above the applicable PPHG threshold. "
+        "This is a recurrence indicator, not a failure count.",
+        note
+    ))
+    story.append(Spacer(1,1.5*mm))
+    story.append(build_equipment_analysis_table(freezer_df))
 
     # PAGE 3 — Alarm analysis and priority
     story.append(PageBreak())
