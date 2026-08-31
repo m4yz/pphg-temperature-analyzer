@@ -598,27 +598,68 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ))
     story.append(Spacer(1,1.5*mm))
 
-    headers = ["Equipment","Cat.","Min °C","Avg °C","Max °C","Start","End",
-               "Continuous","Exceeded","Threshold Events","Status"]
+    # Keep long equipment/category names readable. Paragraphs allow safe
+    # wrapping instead of text colliding with adjacent columns.
+    header_style = ParagraphStyle(
+        "EquipmentTableHeader",
+        parent=tiny,
+        fontName="Helvetica-Bold",
+        fontSize=6.6,
+        leading=7.2,
+        textColor=colors.white,
+        alignment=0,
+    )
+    cell_style = ParagraphStyle(
+        "EquipmentTableCell",
+        parent=tiny,
+        fontSize=6.8,
+        leading=8.0,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+
+    headers = [
+        Paragraph("Equipment", header_style),
+        Paragraph("Category", header_style),
+        Paragraph("Min °C", header_style),
+        Paragraph("Avg °C", header_style),
+        Paragraph("Max °C", header_style),
+        Paragraph("Start", header_style),
+        Paragraph("End", header_style),
+        Paragraph("Continuous", header_style),
+        Paragraph("Exceeded", header_style),
+        Paragraph("Threshold<br/>Events", header_style),
+        Paragraph("Status", header_style),
+    ]
     rows = [headers]
     for _, r in result.iterrows():
         start = r["Longest Start"].strftime("%d-%m %H:%M") if pd.notna(r["Longest Start"]) else "—"
         end = r["Longest End"].strftime("%d-%m %H:%M") if pd.notna(r["Longest End"]) else "—"
         rows.append([
-            Paragraph(str(r["Equipment"]), tiny), str(r["Category"]),
+            Paragraph(str(r["Equipment"]), cell_style),
+            Paragraph(str(r["Category"]), cell_style),
             f"{r['Min °C']:.1f}", f"{r['Average °C']:.1f}", f"{r['Max °C']:.1f}",
             start, end, format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]) if r["Exceeded By"] > pd.Timedelta(0) else "—",
             str(int(r["Threshold Events"])),
             "N/A" if r["Category"]=="Other" else str(r["Status"])
         ])
-    at = Table(rows, colWidths=[57*mm,18*mm,13*mm,13*mm,13*mm,23*mm,23*mm,
-                                27*mm,25*mm,20*mm,20*mm], repeatRows=1)
+
+    # Same overall table footprint, but more room for Equipment/Category and
+    # enough width for time columns. Long labels wrap within their own cell.
+    at = Table(
+        rows,
+        colWidths=[
+            62*mm, 27*mm, 12*mm, 12*mm, 12*mm,
+            21*mm, 21*mm, 25*mm, 23*mm, 19*mm, 18*mm
+        ],
+        repeatRows=1,
+    )
     cmd = [
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,0),6.6),("FONTSIZE",(0,1),(-1,-1),6.8),
+        ("FONTSIZE",(0,1),(-1,-1),6.8),
         ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"CENTER"),
         ("TOPPADDING",(0,0),(-1,-1),2.0),("BOTTOMPADDING",(0,0),(-1,-1),2.0),
