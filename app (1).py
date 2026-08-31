@@ -613,8 +613,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
     cell_style = ParagraphStyle(
         "EquipmentTableCell",
         parent=tiny,
-        fontSize=6.8,
-        leading=8.0,
+        fontSize=6.25,
+        leading=6.9,
         spaceAfter=0,
         spaceBefore=0,
     )
@@ -672,12 +672,12 @@ def build_pdf_report(result, data, median_interval, raw=None):
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
             ("TEXTCOLOR",(0,0),(-1,0),colors.white),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("FONTSIZE",(0,1),(-1,-1),6.8),
+            ("FONTSIZE",(0,1),(-1,-1),6.25),
             ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#C5CCD3")),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("ALIGN",(2,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),2.0),
-            ("BOTTOMPADDING",(0,0),(-1,-1),2.0),
+            ("TOPPADDING",(0,0),(-1,-1),1.0),
+            ("BOTTOMPADDING",(0,0),(-1,-1),1.0),
         ]
 
         for row_idx, (_, r) in enumerate(group_df.iterrows(), 1):
@@ -740,7 +740,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     story.append(Spacer(1,1.5*mm))
     story.append(build_equipment_analysis_table(freezer_df))
 
-    # PAGE 3 — Alarm analysis and priority
+    # PAGE 4 — Alarm analysis and priority
     story.append(PageBreak())
     story.append(Paragraph("3. Alarm Analysis & Priority Review", title))
     story.append(Paragraph(
@@ -785,7 +785,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         note
     ))
 
-    # PAGE 4 — Warning + single point
+    # PAGE 5 — Warning + single point
     story.append(PageBreak())
     story.append(Paragraph("4. Warning & Single-Point Review", title))
     if warnings:
@@ -842,13 +842,12 @@ def build_pdf_report(result, data, median_interval, raw=None):
         ]))
         story.append(stp)
 
-    # PAGE 5 — Threshold Recurrence
+    # PAGE 6 — Threshold Recurrence
     story.append(PageBreak())
     story.append(Paragraph("5. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
-        f"Separately, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours; "
-        f"<b>{len(urgent_single)}</b> of these had only one threshold event. "
+        f"Separately, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours. "
         "Recurrence frequency and prolonged excursions are shown separately.",
         note
     ))
@@ -874,11 +873,11 @@ def build_pdf_report(result, data, median_interval, raw=None):
             ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#17324D")),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
             ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),6.6),
+            ("FONTSIZE",(0,0),(-1,-1),6.3),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("ALIGN",(1,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),1.6),
-            ("BOTTOMPADDING",(0,0),(-1,-1),1.6),
+            ("TOPPADDING",(0,0),(-1,-1),1.0),
+            ("BOTTOMPADDING",(0,0),(-1,-1),1.0),
         ]))
         story.append(rt)
 
