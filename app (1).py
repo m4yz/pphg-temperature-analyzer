@@ -34,6 +34,7 @@ RULES = {
 # Chiller/Freezer threshold rule.
 EQUIPMENT_CODE_CATEGORY = {
     "UPC": ("Upright Chiller", "Chiller"),
+    "UPCS": ("Upright Chiller Showcase", "Chiller"),
     "UDC": ("Under Counter Chiller", "Chiller"),
     "WCH": ("Wine Chiller", "Chiller"),
     "SCH": ("Showcase Chiller", "Chiller"),
