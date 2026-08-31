@@ -415,6 +415,16 @@ def build_pdf_report(result, data, median_interval, raw=None):
     tiny = ParagraphStyle(
         "Tiny", parent=styles["BodyText"], fontSize=6.5, leading=7.8
     )
+    # Category cells in the analytical tables are intentionally narrow.
+    # Paragraphs force long category labels to wrap inside their own cell.
+    category_style = ParagraphStyle(
+        "CategoryTableCell",
+        parent=tiny,
+        fontSize=6.6,
+        leading=7.7,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
     note = ParagraphStyle(
         "Note", parent=styles["BodyText"], fontSize=7.7, leading=9.5,
         textColor=colors.HexColor("#566574")
@@ -694,13 +704,13 @@ def build_pdf_report(result, data, median_interval, raw=None):
     priority = [["Rank","Equipment","Category","Continuous","Exceeded By","Peak °C","Threshold Events"]]
     for rank, (_, r) in enumerate(alarm_df.iterrows(), 1):
         priority.append([
-            str(rank), Paragraph(str(r["Equipment"]), small), str(r["Category"]),
+            str(rank), Paragraph(str(r["Equipment"]), small), Paragraph(str(r["Category"]), category_style),
             format_duration(r["Longest Continuous"]),
             format_duration(r["Exceeded By"]),
             f"{r['Peak During Excursion °C']:.1f}°C",
             str(int(r["Threshold Events"]))
         ])
-    pt2 = Table(priority, colWidths=[13*mm,91*mm,25*mm,34*mm,34*mm,25*mm,28*mm], repeatRows=1)
+    pt2 = Table(priority, colWidths=[13*mm,86*mm,30*mm,34*mm,34*mm,25*mm,28*mm], repeatRows=1)
     st2 = [
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17324D")),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
@@ -735,7 +745,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         wd = [["Equipment","Category","Continuous","Threshold Events","Peak °C"]]
         for _, r in warning_df.iterrows():
             wd.append([
-                Paragraph(str(r["Equipment"]), small), str(r["Category"]),
+                Paragraph(str(r["Equipment"]), small), Paragraph(str(r["Category"]), category_style),
                 format_duration(r["Longest Continuous"]), str(int(r["Threshold Events"])),
                 f"{r['Peak During Excursion °C']:.1f}"
             ])
@@ -772,7 +782,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
         sp = [["Equipment","Category","Observed °C","Timestamp"]]
         for _, r in single_df.iterrows():
             ts = r["Longest Start"].strftime("%d-%m-%Y %H:%M") if pd.notna(r["Longest Start"]) else "—"
-            sp.append([Paragraph(str(r["Equipment"]), tiny), str(r["Category"]),
+            sp.append([Paragraph(str(r["Equipment"]), tiny), Paragraph(str(r["Category"]), category_style),
                        f"{r['Peak During Excursion °C']:.1f}", ts])
         stp = Table(sp, colWidths=[85*mm,28*mm,30*mm,60*mm], repeatRows=1)
         stp.setStyle(TableStyle([
@@ -801,14 +811,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
         for _, r in repeat.iterrows():
             rd.append([
                 Paragraph(str(r["Equipment"]), tiny),
-                str(r["Category"]),
+                Paragraph(str(r["Category"]), category_style),
                 str(int(r["Threshold Events"])),
                 format_duration(r["Longest Continuous"]),
                 str(r["Status"]),
             ])
         rt = Table(
             rd,
-            colWidths=[105*mm,25*mm,28*mm,35*mm,36*mm],
+            colWidths=[101*mm,29*mm,28*mm,35*mm,36*mm],
             repeatRows=1
         )
         rt.setStyle(TableStyle([
@@ -831,14 +841,14 @@ def build_pdf_report(result, data, median_interval, raw=None):
         for _, r in urgent_single.iterrows():
             ud.append([
                 Paragraph(str(r["Equipment"]), tiny),
-                str(r["Category"]),
+                Paragraph(str(r["Category"]), category_style),
                 format_duration(r["Longest Continuous"]),
                 format_duration(r["Exceeded By"]),
                 f"{r['Peak During Excursion °C']:.1f}",
             ])
         ut = Table(
             ud,
-            colWidths=[105*mm,25*mm,35*mm,35*mm,29*mm],
+            colWidths=[101*mm,29*mm,35*mm,35*mm,29*mm],
             repeatRows=1
         )
         ut.setStyle(TableStyle([
