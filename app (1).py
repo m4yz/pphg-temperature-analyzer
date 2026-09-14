@@ -78,7 +78,7 @@ def format_duration(td):
 
 def longest_continuous(g, category, median_interval):
     if category not in RULES:
-        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "N/A"
+        return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
 
     rule = RULES[category]
     g = g.sort_values("Timestamp").copy()
@@ -104,7 +104,7 @@ def longest_continuous(g, category, median_interval):
         return pd.Timedelta(0), pd.NaT, pd.NaT, pd.NaT, "NORMAL"
 
     duration, start, end, peak = best
-    status = "ALARM" if duration >= rule["delay"] else "WARNING"
+    status = "ALARM" if duration >= rule["delay"] else "NORMAL"
     return duration, start, end, peak, status
 
 
@@ -118,7 +118,7 @@ def excursion_stats(g, category, median_interval):
     if category not in RULES:
         return {
             "duration": pd.Timedelta(0), "start": pd.NaT, "end": pd.NaT,
-            "peak": pd.NaT, "status": "N/A", "threshold_events": 0,
+            "peak": pd.NaT, "status": "NORMAL", "threshold_events": 0,
         }
 
     rule = RULES[category]
@@ -153,12 +153,11 @@ def excursion_stats(g, category, median_interval):
 
     best = max(runs, key=lambda x: x["duration"])
 
-    if best["duration"] <= pd.Timedelta(0):
-        status = "SINGLE POINT"
-    elif best["duration"] >= rule["delay"]:
-        status = "ALARM"
-    else:
-        status = "WARNING"
+    # Simplified management classification:
+    # only a continuous excursion reaching the applicable PPHG delay is ALARM.
+    # All other conditions, including isolated points and shorter excursions,
+    # are classified as NORMAL while threshold-event details remain available.
+    status = "ALARM" if best["duration"] >= rule["delay"] else "NORMAL"
 
     return {
         "duration": best["duration"],
@@ -280,7 +279,7 @@ def analyze(df):
         })
 
     out = pd.DataFrame(rows)
-    order = {"ALARM": 0, "WARNING": 1, "NORMAL": 2, "N/A": 3}
+    order = {"ALARM": 0, "NORMAL": 1}
     out["_order"] = out["Status"].map(order).fillna(9)
     out = out.sort_values(
         ["_order", "Longest Continuous"],
@@ -305,12 +304,10 @@ def _report_footer(canvas, doc):
 
 
 def pdf_status_chart(result):
-    """Status distribution used in the PDF. Zero-count N/A is not displayed."""
+    """Status distribution used in the PDF (ALARM/NORMAL only)."""
     order = [
         ("Alarm", "ALARM", "#E84A5F"),
-        ("Warning", "WARNING", "#FF8A4C"),
         ("Normal", "NORMAL", "#4CCB88"),
-        ("Single Point", "SINGLE POINT", "#F4D35E"),
     ]
     active = [
         (label, int((result["Status"] == key).sum()), colors.HexColor(color))
@@ -340,13 +337,11 @@ def pdf_status_chart(result):
     return d
 
 def pdf_status_count_chart(alarm_df):
-    """Status count chart used in the PDF. N/A is intentionally omitted."""
+    """Status count chart used in the PDF (ALARM/NORMAL only)."""
     result = _CURRENT_RESULT_FOR_PDF
     order = [
         ("Alarm", "ALARM", "#E84A5F"),
-        ("Warning", "WARNING", "#FF8A4C"),
         ("Normal", "NORMAL", "#4CCB88"),
-        ("Single Point", "SINGLE POINT", "#F4D35E"),
     ]
     active = [
         (label, int((result["Status"] == key).sum()), colors.HexColor(color))
@@ -436,10 +431,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     )
 
     alarms = int((result["Status"] == "ALARM").sum())
-    warnings = int((result["Status"] == "WARNING").sum())
     normal = int((result["Status"] == "NORMAL").sum())
-    other = int((result["Status"] == "N/A").sum())
-    single = int((result["Status"] == "SINGLE POINT").sum())
     urgent = int((
         result.loc[result["Status"] == "ALARM", "Longest Continuous"]
         > pd.Timedelta(hours=24)
@@ -455,10 +447,6 @@ def build_pdf_report(result, data, median_interval, raw=None):
     alarm_df = result[result["Status"] == "ALARM"].sort_values(
         ["Exceeded By", "Longest Continuous"], ascending=[False, False]
     ).copy()
-    warning_df = result[result["Status"] == "WARNING"].sort_values(
-        ["Longest Continuous", "Threshold Events"], ascending=[False, False]
-    ).copy()
-    single_df = result[result["Status"] == "SINGLE POINT"].copy()
     repeat = result[result["Threshold Events"] >= 2].sort_values(
         ["Threshold Events", "Longest Continuous"], ascending=[False, False]
     ).copy()
@@ -476,7 +464,7 @@ def build_pdf_report(result, data, median_interval, raw=None):
     # PAGE 1 — Executive Summary
     story.append(Paragraph("1. Executive Summary", title))
     story.append(Paragraph(
-        f"<b>Overall Assessment: {'ATTENTION REQUIRED' if alarms else ('MONITOR' if warnings else 'NORMAL')}</b> "
+        f"<b>Overall Assessment: {'ATTENTION REQUIRED' if alarms else 'NORMAL'}</b> "
         f"• Analysis period: <b>{period}</b> • Sampling interval: approximately "
         f"<b>{round(median_interval.total_seconds()/60):g} min</b>",
         callout
@@ -498,17 +486,13 @@ def build_pdf_report(result, data, median_interval, raw=None):
     kpi_cells = [
         Paragraph(f"<b>Equipment</b><br/><font size=17 color='#17324D'>{len(result)}</font>", kpi_text),
         Paragraph(f"<b>Alarm</b><br/><font size=17 color='#E84A5F'>{alarms}</font>", kpi_text),
-        Paragraph(f"<b>Warning</b><br/><font size=17 color='#FF8A4C'>{warnings}</font>", kpi_text),
         Paragraph(f"<b>Normal</b><br/><font size=17 color='#4CCB88'>{normal}</font>", kpi_text),
-        Paragraph(f"<b>Single Point</b><br/><font size=17 color='#B38B00'>{single}</font>", kpi_text),
     ]
-    kpi = Table([kpi_cells], colWidths=[53.4*mm]*5, rowHeights=[16.5*mm])
+    kpi = Table([kpi_cells], colWidths=[89*mm]*3, rowHeights=[16.5*mm])
     kpi.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F3F7FA")),
         ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF0F0")),
-        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#FFF4E6")),
-        ("BACKGROUND",(3,0),(3,0),colors.HexColor("#EAF8F0")),
-        ("BACKGROUND",(4,0),(4,0),colors.HexColor("#FFF8D9")),
+        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#EAF8F0")),
         ("BOX",(0,0),(-1,-1),0.35,colors.HexColor("#D0D7DE")),
         ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#D0D7DE")),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -520,7 +504,8 @@ def build_pdf_report(result, data, median_interval, raw=None):
     ]))
     story.append(kpi)
     story.append(Paragraph(
-        "<b>Single Point</b> = threshold observed but no elapsed duration can be established.",
+        "<b>Classification:</b> Only excursions reaching the applicable PPHG alarm duration are classified as ALARM. "
+        "All shorter or isolated threshold observations remain NORMAL, with event details retained for reference.",
         note
     ))
     story.append(Spacer(1,4*mm))
@@ -688,17 +673,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
                     ("TEXTCOLOR",(-1,row_idx),(-1,row_idx),colors.HexColor("#B00020")),
                     ("FONTNAME",(-1,row_idx),(-1,row_idx),"Helvetica-Bold"),
                 ]
-            elif status == "WARNING":
-                style_cmd.append(
-                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#FFF0CC"))
-                )
             elif status == "NORMAL":
                 style_cmd.append(
                     ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#D9F5E5"))
-                )
-            elif status == "SINGLE POINT":
-                style_cmd.append(
-                    ("BACKGROUND",(-1,row_idx),(-1,row_idx),colors.HexColor("#FFF7D6"))
                 )
 
         table.setStyle(TableStyle(style_cmd))
@@ -785,66 +762,9 @@ def build_pdf_report(result, data, median_interval, raw=None):
         note
     ))
 
-    # PAGE 5 — Warning + single point
+    # PAGE 5 — Threshold Recurrence
     story.append(PageBreak())
-    story.append(Paragraph("4. Warning & Single-Point Review", title))
-    if warnings:
-        story.append(Paragraph("WARNING — Monitor & Follow Up", h2))
-        wd = [["Equipment","Category","Continuous","Threshold Events","Peak °C"]]
-        for _, r in warning_df.iterrows():
-            wd.append([
-                Paragraph(str(r["Equipment"]), small), Paragraph(str(r["Category"]), category_style),
-                format_duration(r["Longest Continuous"]), str(int(r["Threshold Events"])),
-                f"{r['Peak During Excursion °C']:.1f}"
-            ])
-        wt = Table(wd, colWidths=[92*mm,30*mm,36*mm,30*mm,28*mm], repeatRows=1)
-        wt.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF0CC")),
-            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#6B4A00")),
-            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),7.0),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("ALIGN",(1,1),(-1,-1),"CENTER"),
-            ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
-        ]))
-        story.append(wt)
-        story.append(Paragraph(
-            "<b>Warning interpretation:</b> These units exceeded the applicable temperature threshold but did not reach the PPHG alarm duration. "
-            "They should be monitored for recurrence, especially when event duration approaches the alarm delay.",
-            note
-        ))
-        story.append(Paragraph(
-            "<b>General review notes:</b> Chillers — door/loading, ambient exposure, condenser/coil, airflow and temperature control. "
-            "Freezers — refrigeration performance, door/seal, defrost, loading and condenser/coil.",
-            note
-        ))
-
-    if not single_df.empty:
-        story.append(Spacer(1,3*mm))
-        story.append(Paragraph("Single-Point Threshold Events", h2))
-        story.append(Paragraph(
-            "A threshold event was observed, but no elapsed duration can be established from the available point(s). "
-            "These are not classified as WARNING or ALARM.",
-            note
-        ))
-        sp = [["Equipment","Category","Observed °C","Timestamp"]]
-        for _, r in single_df.iterrows():
-            ts = r["Longest Start"].strftime("%d-%m-%Y %H:%M") if pd.notna(r["Longest Start"]) else "—"
-            sp.append([Paragraph(str(r["Equipment"]), tiny), Paragraph(str(r["Category"]), category_style),
-                       f"{r['Peak During Excursion °C']:.1f}", ts])
-        stp = Table(sp, colWidths=[85*mm,28*mm,30*mm,60*mm], repeatRows=1)
-        stp.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFF7D6")),
-            ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#7A5A00")),
-            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C5CCD3")),
-            ("FONTSIZE",(0,0),(-1,-1),7),("ALIGN",(1,1),(-1,-1),"CENTER"),
-        ]))
-        story.append(stp)
-
-    # PAGE 6 — Threshold Recurrence
-    story.append(PageBreak())
-    story.append(Paragraph("5. Threshold Recurrence", title))
+    story.append(Paragraph("4. Threshold Recurrence", title))
     story.append(Paragraph(
         f"<b>{len(repeat)}</b> equipment recorded two or more distinct threshold events during the analysis period. "
         f"Separately, <b>{len(urgent_over24)}</b> equipment had a continuous threshold event exceeding 24 hours. "
@@ -925,20 +845,8 @@ if uploaded:
             f"Sampling interval terdeteksi ≈ {round(median_interval.total_seconds()/60):g} menit."
         )
 
-        unmapped = sorted(
-            result.loc[result["Status"] == "N/A", "Equipment"].dropna().unique().tolist()
-        )
-        if unmapped:
-            st.info(
-                f"{len(unmapped)} equipment memiliki kode kategori yang belum dikenal: "
-                "tetap dianalisis sebagai Other/N/A: " + ", ".join(unmapped)
-            )
-
         alarms = int((result["Status"] == "ALARM").sum())
-        warnings = int((result["Status"] == "WARNING").sum())
         normal = int((result["Status"] == "NORMAL").sum())
-        single_status = int((result["Status"] == "SINGLE POINT").sum())
-        na_status = int((result["Status"] == "N/A").sum())
 
         # ------------------------------------------------------------
         # Executive Summary
@@ -948,19 +856,17 @@ if uploaded:
             "Overview of equipment status based on PPHG temperature threshold-event analysis."
         )
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Equipment", equipment_count)
         c2.metric("🔴 Alarm", alarms)
-        c3.metric("🟠 Warning", warnings)
-        c4.metric("🟢 Normal", normal)
-        c5.metric("🟡 Single Point", single_status)
+        c3.metric("🟢 Normal", normal)
 
         chart_left, chart_right = st.columns(2)
 
         # Status distribution donut.
         status_df = pd.DataFrame({
-            "Status": ["Alarm", "Warning", "Normal", "Single Point"],
-            "Count": [alarms, warnings, normal, single_status],
+            "Status": ["Alarm", "Normal"],
+            "Count": [alarms, normal],
         })
         status_df = status_df[status_df["Count"] > 0]
 
@@ -976,9 +882,7 @@ if uploaded:
                 textposition="inside",
                 textinfo="percent",
                 hovertemplate="%{label}: %{value} equipment<extra></extra>",
-                marker=dict(
-                    colors=["#E84A5F", "#FF8A4C", "#4CCB88", "#9AA3AD"]
-                ),
+                marker=dict(colors=["#E84A5F", "#4CCB88"]),
             )
             donut.update_layout(
                 margin=dict(l=10, r=10, t=20, b=10),
@@ -1004,8 +908,7 @@ if uploaded:
                 textposition="outside",
                 hovertemplate="%{x}: %{y} equipment<extra></extra>",
                 marker_color=[
-                    {"Alarm": "#E84A5F", "Warning": "#FF8A4C",
-                     "Normal": "#4CCB88", "Single Point": "#F4D35E", "N/A": "#9AA3AD"}[s]
+                    {"Alarm": "#E84A5F", "Normal": "#4CCB88"}[s]
                     for s in status_df["Status"]
                 ],
             )
@@ -1086,16 +989,6 @@ if uploaded:
                 f"peak **{top['Peak During Excursion °C']:.1f}°C**."
             )
 
-        if warnings:
-            findings.append(
-                f"**{warnings} equipment** recorded threshold events below the PPHG "
-                f"alarm-duration threshold and should be monitored for recurrence."
-            )
-
-        if single_status:
-            findings.append(
-                f"**{single_status} equipment** have threshold observations without an established elapsed duration and are classified as **SINGLE POINT**."
-            )
         if not findings:
             findings.append("No PPHG Chiller/Freezer alarm-duration threshold events were identified.")
 
@@ -1111,7 +1004,7 @@ if uploaded:
         # Keep the UI simple: filter by the two PPHG groups only.
         # Detailed equipment type remains visible in the Category column.
         category_options = ["All", "Chiller", "Freezer"]
-        status_options = ["All", "ALARM", "WARNING", "NORMAL", "SINGLE POINT"]
+        status_options = ["All", "ALARM", "NORMAL"]
 
         selected_category = f1.selectbox(
             "Filter by category",
@@ -1176,8 +1069,6 @@ if uploaded:
             i = table_cols.index("Status")
             if row["Status"] == "ALARM":
                 styles[i] = "background-color:#ffd6d6;color:#b00020;font-weight:700"
-            elif row["Status"] == "WARNING":
-                styles[i] = "background-color:#fff0cc;color:#9a5b00;font-weight:700"
             elif row["Status"] == "NORMAL":
                 styles[i] = "background-color:#d9f5e5;color:#087443;font-weight:700"
             return styles
@@ -1210,7 +1101,7 @@ if uploaded:
             title=f"{selected} — Temperature Trend",
         )
 
-        category = selected_result["Category"]
+        category = selected_result["PPHG Group"]
         if category in RULES:
             limit = RULES[category]["limit"]
             fig.add_hline(
